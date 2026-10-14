@@ -757,6 +757,7 @@ namespace wxl_ui
         if (!player_) return;
         cytubePlayable_ = wxl_cytube::ResolvePlayable(cytubeMedia_);
         cytubeAskedAgain_ = false;
+        cytubeSettleSeeks_ = 2;
         if (cytubeSync_) cytubeSync_->Reset();
         player_->SetSyncCorrection(1.0);
         if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
@@ -794,12 +795,27 @@ namespace wxl_ui
             remote, wxl_cytube::CytubeClient::NowMs(), static_cast<int64_t>(std::max(0.0, lastPositionSeconds_) * 1000.0),
             paused_ || stopped_, wxl_cytube::IdentityFor(cytubeChannel_, cytubeMedia_), afterLoad);
         if (!decision.accepted) return;
-        const double base = std::max(0.25, player_->PlaybackSpeed());
-        player_->SetSyncCorrection(decision.effectiveSpeed / base);
-        if (decision.shouldSeek)
+        bool seek = decision.shouldSeek;
+        if (!seek && cytubeSettleSeeks_ > 0 && !cytubePaused_)
         {
-            player_->Seek(decision.targetPositionMs / 1000.0);
-            lastPositionSeconds_ = decision.targetPositionMs / 1000.0;
+            // A seek into a network stream lands behind by however long it took (Google Drive: ~1.5 s), which the 1-2%
+            // nudge takes minutes to close. Learn that lag and seek again, ahead by it: twice per item at most.
+            if (std::llabs(decision.driftMs) > 700)
+            {
+                cytubeSeekLeadMs_ = std::clamp<int64_t>(cytubeSeekLeadMs_ + decision.driftMs, 0, 5000);
+                --cytubeSettleSeeks_;
+                seek = true;
+            }
+            else
+                cytubeSettleSeeks_ = 0;
+        }
+        const double base = std::max(0.25, player_->PlaybackSpeed());
+        player_->SetSyncCorrection(seek ? 1.0 : decision.effectiveSpeed / base);
+        if (seek)
+        {
+            const int64_t target = decision.targetPositionMs + (cytubePaused_ ? 0 : cytubeSeekLeadMs_);
+            player_->Seek(target / 1000.0);
+            lastPositionSeconds_ = target / 1000.0;
         }
         if (decision.shouldPause) { player_->Pause(); paused_ = true; }
         else if (decision.shouldPlay) { player_->Play(); paused_ = false; }
@@ -1138,6 +1154,7 @@ namespace wxl_ui
             autoplayDeadline_ = 0;
             cytubeMode_ = true;
             cytubeChannel_ = channel;
+            cytubeSeekLeadMs_ = 0;
             cytubeStatus_ = "Joining " + channel.channel + ".";
             cytube_->Join(channel);
             status_ = "CyTube: " + channel.channel + ".";

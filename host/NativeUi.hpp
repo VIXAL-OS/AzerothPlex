@@ -182,6 +182,8 @@ namespace wxl_ui
         bool cytubePaused_ = false;
         int64_t cytubeHeardAtMs_ = 0;  // when (system clock)
         uint64_t cytubeEpoch_ = 0, cytubeSequence_ = 0;
+        int cytubeSettleSeeks_ = 0;    // re-seeks left for this item while it lands behind (see ApplyCytubeClock)
+        int64_t cytubeSeekLeadMs_ = 0; // how far ahead to seek: the stream's learned seek lag
         std::string cytubeStatus_;
     };
 }
