@@ -49,6 +49,10 @@ namespace wxl_video_screen
         void DrawPlexSettings();
         void DrawMiniPlayer();
         void DrawCytubeSection();
+        // Stonewall TV: a neon "Stonewall TV" sign above the screen, its rainbow glittering.
+        void DrawStonewall(IDirect3DDevice9* device, void* sceneDepth);
+        bool EnsureStonewallTextures(IDirect3DDevice9* device);
+        void ReleaseStonewallTextures();
         bool OpenHost();
         void HideHost();
         void CloseHost();
@@ -175,6 +179,16 @@ namespace wxl_video_screen
         int fitMode_ = 0;
         int frameStyle_ = 0;
         int ambientLighting_ = 0;
+        int stonewall_ = 0;
+        IDirect3DDevice9* stonewallDevice_ = nullptr;
+        IDirect3DTexture9* signTexture_ = nullptr;   // the rainbow and "Stonewall"
+        IDirect3DTexture9* tvTexture_ = nullptr;     // "TV" (its own layer: it flickers)
+        IDirect3DTexture9* sparkleTexture_ = nullptr;
+        float signSplit_ = 0.75f;
+        float signArc_[5]{};      // the rainbow on the sign: arc centre u, v; band radii; where it goes behind the S (radians)
+        float signCenter_ = 0.5f; // the design's middle (u)
+        float signAspect_ = 0.25f; // the sign texture's height / width
+        bool stonewallFailed_ = false;
         int cinemaMode_ = 0;
         uint32_t ambientColor_ = 0xFF202020u;
         DWORD lastAmbientSampleAt_ = 0;

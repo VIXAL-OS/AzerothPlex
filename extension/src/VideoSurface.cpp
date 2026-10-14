@@ -4,6 +4,7 @@
 
 #include "VideoSurface.hpp"
 
+#include "StonewallArt.hpp"
 #include "VideoShared.hpp"
 
 #include "game/Camera.hpp"
@@ -95,6 +96,20 @@ namespace wxl_video_screen
             case 8: return 0xFF181818u; // Outdoor cinema.
             default: return 0xFF101010u;
             }
+        }
+
+        IDirect3DTexture9* MakeTexture(IDirect3DDevice9* device, int w, int h, const std::vector<uint32_t>& pixels)
+        {
+            IDirect3DTexture9* texture = nullptr;
+            if (FAILED(device->CreateTexture(w, h, 0, D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &texture, nullptr)) &&
+                FAILED(device->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &texture, nullptr)))
+                return nullptr;
+            D3DLOCKED_RECT locked{};
+            if (FAILED(texture->LockRect(0, &locked, nullptr, 0))) { texture->Release(); return nullptr; }
+            for (int y = 0; y < h; ++y)
+                std::memcpy(static_cast<uint8_t*>(locked.pBits) + size_t(y) * locked.Pitch, pixels.data() + size_t(y) * w, size_t(w) * 4);
+            texture->UnlockRect(0);
+            return texture;
         }
 
         D3DCOLOR FrameAccentColor(int style)
@@ -737,7 +752,7 @@ namespace wxl_video_screen
                << '\t' << pinned_ << '\t' << pinnedLeft_ << '\t' << pinnedTop_
                << '\t' << pinnedWidth_ << '\t' << aspectRatioMode_ << '\t' << fitMode_
                << '\t' << frameStyle_ << '\t' << ambientLighting_ << '\t' << spatialAudio_
-               << '\t' << silentDistance_ << '\n';
+               << '\t' << silentDistance_ << '\t' << stonewall_ << '\n';
         output.close();
         if (!output) return;
         MoveFileExW(temporary.c_str(), target.c_str(),
@@ -770,6 +785,7 @@ namespace wxl_video_screen
         int ambientLighting = 0;
         int spatialAudio = 1;
         float silentDistance = 60.0f;
+        int stonewall = 0;
         if (!std::getline(input, version, '\t') || version != "wxl-video-screen-v1" ||
             !(input >> map) || input.get() != '\t' ||
             !(input >> center[0]) || input.get() != '\t' ||
@@ -812,6 +828,7 @@ namespace wxl_video_screen
         if (input.peek() == '\t') { input.get(); if (!(input >> ambientLighting)) ambientLighting = 0; }
         if (input.peek() == '\t') { input.get(); if (!(input >> spatialAudio)) spatialAudio = 1; }
         if (input.peek() == '\t') { input.get(); if (!(input >> silentDistance)) silentDistance = 60.0f; }
+        if (input.peek() == '\t') { input.get(); if (!(input >> stonewall)) stonewall = 0; }
 
         const float rightLength = std::sqrt(right[0] * right[0] + right[1] * right[1]);
         if (map < 0 || !Finite3(center) || !(rightLength > 0.9f && rightLength < 1.1f) ||
@@ -837,6 +854,7 @@ namespace wxl_video_screen
         fitMode_ = std::clamp(fitMode, 0, 3);
         frameStyle_ = std::clamp(frameStyle, 0, 8);
         ambientLighting_ = ambientLighting ? 1 : 0;
+        stonewall_ = stonewall ? 1 : 0;
         spatialAudio_ = spatialAudio ? 1 : 0;
         silentDistance_ = std::isfinite(silentDistance) ? std::clamp(silentDistance, 10.0f, 200.0f) : 60.0f;
         placed_ = true;
@@ -1629,8 +1647,12 @@ namespace wxl_video_screen
         }
         if (pinned_)
             DrawPinnedScreen(static_cast<IDirect3DDevice9*>(args.device));
-        else if (!depthTest_)
-            DrawWorldScreen(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth, false);
+        else
+        {
+            if (!depthTest_)
+                DrawWorldScreen(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth, false);
+            DrawStonewall(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth);
+        }
     }
 
     void VideoSurface::OnUpdate(const wxl::events::UpdateArgs& args)
@@ -1674,6 +1696,184 @@ namespace wxl_video_screen
             }
         }
         SendVolume(targetVolume);
+    }
+
+    void VideoSurface::ReleaseStonewallTextures()
+    {
+        for (IDirect3DTexture9** texture : { &signTexture_, &tvTexture_, &sparkleTexture_ })
+            if (*texture) { (*texture)->Release(); *texture = nullptr; }
+        stonewallDevice_ = nullptr;
+    }
+
+    bool VideoSurface::EnsureStonewallTextures(IDirect3DDevice9* device)
+    {
+        if (stonewallDevice_ != device) ReleaseStonewallTextures();
+        if (signTexture_ && tvTexture_ && sparkleTexture_) return true;
+        if (stonewallFailed_) return false;
+        stonewallDevice_ = device;
+        // The sign as shipped (its fonts come with Office, not Windows); rendered here only if the file is missing.
+        art::Sign sign;
+        const std::wstring directory = ExtensionDirectory();
+        const std::wstring path = directory.empty() ? std::wstring{} : (std::filesystem::path(directory) / L"stonewall-sign.bin").wstring();
+        if (path.empty() || !art::LoadSign(path.c_str(), sign))
+        {
+            sign = art::MakeSign(1024, 256);
+            if (api_) api_->Log(WXL_LOG_WARN, kTag, "Stonewall TV: stonewall-sign.bin missing or unreadable; rendered the sign here.");
+        }
+        signSplit_ = sign.split;
+        signArc_[0] = sign.arcU; signArc_[1] = sign.arcV; signArc_[2] = sign.arcInner; signArc_[3] = sign.arcOuter;
+        signArc_[4] = sign.arcEnd;
+        signCenter_ = sign.centerU;
+        signAspect_ = sign.w > 0 ? static_cast<float>(sign.h) / sign.w : 0.25f;
+        signTexture_ = MakeTexture(device, sign.w, sign.h, sign.pixels);
+        tvTexture_ = MakeTexture(device, sign.w, sign.h, sign.tv);
+        sparkleTexture_ = MakeTexture(device, 64, 64, art::SparklePixels(64));
+        if (!signTexture_ || !tvTexture_ || !sparkleTexture_)
+        {
+            stonewallFailed_ = true;
+            ReleaseStonewallTextures();
+            if (api_) api_->Log(WXL_LOG_ERROR, kTag, "Stonewall TV: could not create its textures.");
+            return false;
+        }
+        return true;
+    }
+
+    namespace
+    {
+        uint32_t Hash(uint32_t x)
+        {
+            x ^= x >> 16; x *= 0x7FEB352Du;
+            x ^= x >> 15; x *= 0x846CA68Bu;
+            return x ^ (x >> 16);
+        }
+        float Hash01(uint32_t x) { return (Hash(x) & 0xFFFFFFu) / 16777216.0f; }
+        D3DCOLOR Grey(float level)
+        {
+            const uint32_t c = static_cast<uint32_t>(std::clamp(level, 0.0f, 1.0f) * 255.0f + 0.5f);
+            return (c << 24) | (c << 16) | (c << 8) | c;
+        }
+    }
+
+    // After the world, so it blends over what's behind it; depth-tested (characters walk in front), no depth writes.
+    void VideoSurface::DrawStonewall(IDirect3DDevice9* device, void* sceneDepthRaw)
+    {
+        if (!device || !placed_ || !visible_ || !stonewall_ || wxl::game::world::CurrentMapId() != mapId_) return;
+        if (!EnsureStonewallTextures(device)) return;
+
+        float eye[3]{};
+        wxl::game::camera::GetPosition(eye);
+        D3DMATRIX world{};
+        world._11 = world._22 = world._33 = world._44 = 1.0f;
+        world._41 = -eye[0];
+        world._42 = -eye[1];
+        world._43 = -eye[2];
+        D3DMATRIX view{}, projection{};
+        if (!wxl::game::gfx::SceneMatrices(&view._11, &projection._11)) return;
+
+        IDirect3DStateBlock9* state = nullptr;
+        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
+        IDirect3DSurface9* oldDepth = nullptr;
+        device->GetDepthStencilSurface(&oldDepth);
+        auto* sceneDepth = static_cast<IDirect3DSurface9*>(sceneDepthRaw);
+        if (sceneDepth) device->SetDepthStencilSurface(sceneDepth);
+
+        device->SetTransform(D3DTS_WORLD, &world);
+        device->SetTransform(D3DTS_VIEW, &view);
+        device->SetTransform(D3DTS_PROJECTION, &projection);
+        device->SetVertexShader(nullptr);
+        device->SetPixelShader(nullptr);
+        device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+        device->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+        device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+        device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+        device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+        device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_CLIPPING, TRUE);
+        device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
+        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_ZENABLE, sceneDepth && depthTest_ ? D3DZB_TRUE : D3DZB_FALSE);
+        device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        DWORD noBias = 0;
+        device->SetRenderState(D3DRS_DEPTHBIAS, noBias);
+
+        // Positions in the screen's plane: h yards toward the viewer's right of its centre (the screen's u runs that way:
+        // its viewer-right edge is center - right * half), z yards up, `lift` yards toward the camera.
+        float toward[3] = { right_[1], -right_[0], 0.0f };
+        if ((eye[0] - center_[0]) * toward[0] + (eye[1] - center_[1]) * toward[1] < 0.0f) { toward[0] = -toward[0]; toward[1] = -toward[1]; }
+        const auto quad = [&](IDirect3DTexture9* texture, float h0, float h1, float z0, float z1, float u0, float u1,
+                              float lift, D3DCOLOR colour) {
+            const auto at = [&](float h, float z, float u, float v) {
+                return Vertex{ center_[0] - right_[0] * h + toward[0] * lift, center_[1] - right_[1] * h + toward[1] * lift,
+                               center_[2] + z, colour, u, v };
+            };
+            const Vertex v[4] = { at(h0, z1, u0, 0.0f), at(h1, z1, u1, 0.0f), at(h0, z0, u0, 1.0f), at(h1, z0, u1, 1.0f) };
+            device->SetTexture(0, texture);
+            device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(Vertex));
+        };
+
+        // Above the screen (its height follows the aspect setting) and above whatever frame is drawn round it: the tallest
+        // frames reach about 2.1 rails over the top (a rail is 6% of the half-height), the ambient halo about 2.9.
+        const float W = width_, halfHeight = W * 0.5f / ScreenAspectRatio(), rail = halfHeight * 0.06f;
+        const float top = halfHeight + (ambientLighting_ ? rail * 2.95f : frameStyle_ > 0 ? rail * 2.2f : 0.0f);
+        const float t = static_cast<float>(GetTickCount() % 3600000u) / 1000.0f;
+
+        // The sign, centred above the screen. The rainbow and "Stonewall" hum; "TV" is a tube on its way out: every few
+        // seconds it stutters (60 ms on/off for about half a second).
+        const float signW = W * 0.78f, signH = signW * signAspect_, signZ = top + W * 0.01f;
+        const float left = -signW * signCenter_; // the design (not the texture) centred
+        const float hum = 0.93f + 0.07f * std::sin(t * 1.3f);
+        quad(signTexture_, left, left + signW, signZ, signZ + signH, 0.0f, 1.0f, 0.0f, Grey(hum));
+        const uint32_t epoch = static_cast<uint32_t>(t / 7.0f);
+        const float burst = epoch * 7.0f + Hash01(epoch * 3u + 1u) * 5.5f;
+        float tv = 0.96f;
+        if (t >= burst && t < burst + 0.55f) tv = (Hash(static_cast<uint32_t>(t / 0.06f)) & 3u) ? 1.0f : 0.12f;
+        quad(tvTexture_, left, left + signW, signZ, signZ + signH, 0.0f, 1.0f, 0.0f, Grey(tv * hum));
+
+        // Glitter on the rainbow: sparkles that twinkle along its visible arc (up to where it passes behind the S), each
+        // somewhere new every time it flashes.
+        const float arcU = signArc_[0], arcV = signArc_[1], inner = signArc_[2], outer = signArc_[3], arcEnd = signArc_[4];
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            const float period = 1.1f + Hash01(i * 7u + 3u) * 1.6f, phase = Hash01(i * 11u + 5u) * period;
+            const float cycles = (t + phase) / period;
+            const uint32_t cycle = static_cast<uint32_t>(cycles);
+            const float flash = std::pow(std::sin((cycles - static_cast<float>(cycle)) * 3.14159265f), 6.0f);
+            if (flash < 0.02f) continue;
+            const uint32_t seed = i * 977u + cycle * 131u;
+            const float r = inner + (outer - inner) * (0.15f + 0.7f * Hash01(seed + 1u)); // in texture heights
+            const float angle = arcEnd + (3.14159265f - arcEnd) * (0.04f + 0.92f * Hash01(seed));
+            const float u = arcU + std::cos(angle) * r * signAspect_, v = arcV - std::sin(angle) * r;
+            const float sh = left + u * signW, sz = signZ + (1.0f - v) * signH, size = signH * 0.16f * (0.5f + 0.5f * flash);
+            quad(sparkleTexture_, sh - size * 0.5f, sh + size * 0.5f, sz - size * 0.5f, sz + size * 0.5f, 0.0f, 1.0f, 0.005f,
+                 Grey(flash));
+        }
+        device->SetTexture(0, nullptr);
+
+        device->SetDepthStencilSurface(oldDepth);
+        if (oldDepth) oldDepth->Release();
+        state->Apply();
+        state->Release();
     }
 
     void VideoSurface::OnDeviceLost(const wxl::events::DeviceResetArgs&)
@@ -2503,6 +2703,8 @@ namespace wxl_video_screen
             "Screen frame (0 none, 1 TV, 2 Goblin, 3 Gnome, 4 Orc, 5 Blood Elf, 6 Titan, 7 Tavern, 8 Outdoor)",
             &frameStyle_, 0, 8) != 0 || cinemaVisualChanged;
         cinemaVisualChanged = api_->UiCheckbox("Ambient screen glow", &ambientLighting_) != 0 || cinemaVisualChanged;
+        cinemaVisualChanged = api_->UiCheckbox("Stonewall TV: neon sign with a glittery rainbow", &stonewall_) != 0 ||
+                              cinemaVisualChanged;
         if (cinemaVisualChanged && placed_) SavePlacement();
         if (api_->UiCheckbox("Cinema mode (compact viewing controls)", &cinemaMode_))
         {
