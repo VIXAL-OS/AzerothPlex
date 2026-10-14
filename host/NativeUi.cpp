@@ -748,6 +748,7 @@ namespace wxl_ui
         stopped_ = true;
         paused_ = false;
         if (player_) player_->SetSyncCorrection(1.0);
+        cytubeCorrectionUntilMs_ = 0;
         cytubeStatus_ = why;
     }
 
@@ -757,7 +758,6 @@ namespace wxl_ui
         if (!player_) return;
         cytubePlayable_ = wxl_cytube::ResolvePlayable(cytubeMedia_);
         cytubeAskedAgain_ = false;
-        cytubeSettleSeeks_ = 2;
         if (cytubeSync_) cytubeSync_->Reset();
         player_->SetSyncCorrection(1.0);
         if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
@@ -795,27 +795,21 @@ namespace wxl_ui
             remote, wxl_cytube::CytubeClient::NowMs(), static_cast<int64_t>(std::max(0.0, lastPositionSeconds_) * 1000.0),
             paused_ || stopped_, wxl_cytube::IdentityFor(cytubeChannel_, cytubeMedia_), afterLoad);
         if (!decision.accepted) return;
-        bool seek = decision.shouldSeek;
-        if (!seek && cytubeSettleSeeks_ > 0 && !cytubePaused_)
+        // A seek into a network stream lands behind by however long it took (about 1.5 s on Google Drive, but next to
+        // nothing once that part is buffered, so it can't be led), and Watch Together's 1-2% nudge needs minutes for
+        // that. Between the thresholds, play faster or slower to close about 80% of the gap before the next mediaUpdate
+        // (5 s), within the player's 5% limit: never past the channel. Back to 1x if no update comes.
+        double correction = 1.0;
+        if (!decision.shouldSeek && !cytubePaused_ && std::llabs(decision.driftMs) > 500)
         {
-            // A seek into a network stream lands behind by however long it took (Google Drive: ~1.5 s), which the 1-2%
-            // nudge takes minutes to close. Learn that lag and seek again, ahead by it: twice per item at most.
-            if (std::llabs(decision.driftMs) > 700)
-            {
-                cytubeSeekLeadMs_ = std::clamp<int64_t>(cytubeSeekLeadMs_ + decision.driftMs, 0, 5000);
-                --cytubeSettleSeeks_;
-                seek = true;
-            }
-            else
-                cytubeSettleSeeks_ = 0;
+            correction = 1.0 + std::clamp(decision.driftMs * 0.8 / 5000.0, -0.05, 0.05);
+            cytubeCorrectionUntilMs_ = wxl_cytube::CytubeClient::NowMs() + 6000;
         }
-        const double base = std::max(0.25, player_->PlaybackSpeed());
-        player_->SetSyncCorrection(seek ? 1.0 : decision.effectiveSpeed / base);
-        if (seek)
+        player_->SetSyncCorrection(correction);
+        if (decision.shouldSeek)
         {
-            const int64_t target = decision.targetPositionMs + (cytubePaused_ ? 0 : cytubeSeekLeadMs_);
-            player_->Seek(target / 1000.0);
-            lastPositionSeconds_ = target / 1000.0;
+            player_->Seek(decision.targetPositionMs / 1000.0);
+            lastPositionSeconds_ = decision.targetPositionMs / 1000.0;
         }
         if (decision.shouldPause) { player_->Pause(); paused_ = true; }
         else if (decision.shouldPlay) { player_->Play(); paused_ = false; }
@@ -864,6 +858,11 @@ namespace wxl_ui
     void NativeUi::PumpCytubeEvents()
     {
         if (!cytube_) return;
+        if (cytubeCorrectionUntilMs_ && wxl_cytube::CytubeClient::NowMs() > cytubeCorrectionUntilMs_)
+        {
+            cytubeCorrectionUntilMs_ = 0;
+            if (player_) player_->SetSyncCorrection(1.0);
+        }
         wxl_cytube::ClientEvent event;
         while (cytube_->PopEvent(event))
         {
@@ -1154,7 +1153,6 @@ namespace wxl_ui
             autoplayDeadline_ = 0;
             cytubeMode_ = true;
             cytubeChannel_ = channel;
-            cytubeSeekLeadMs_ = 0;
             cytubeStatus_ = "Joining " + channel.channel + ".";
             cytube_->Join(channel);
             status_ = "CyTube: " + channel.channel + ".";

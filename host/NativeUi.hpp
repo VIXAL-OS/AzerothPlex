@@ -183,8 +183,7 @@ namespace wxl_ui
         bool cytubePaused_ = false;
         int64_t cytubeHeardAtMs_ = 0;  // when (system clock)
         uint64_t cytubeEpoch_ = 0, cytubeSequence_ = 0;
-        int cytubeSettleSeeks_ = 0;    // re-seeks left for this item while it lands behind (see ApplyCytubeClock)
-        int64_t cytubeSeekLeadMs_ = 0; // how far ahead to seek: the stream's learned seek lag
+        int64_t cytubeCorrectionUntilMs_ = 0; // a catch-up speed ends here unless a mediaUpdate renews it
         std::string cytubeStatus_;
     };
 }
