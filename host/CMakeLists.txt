@@ -117,3 +117,9 @@ target_include_directories(session_store_tests PRIVATE
 target_compile_definitions(session_store_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 add_test(NAME session_store_tests COMMAND session_store_tests)
 
+add_executable(cytube_tests tests/CytubeTests.cpp CytubeProtocol.cpp PartyTypes.cpp SyncController.cpp)
+target_include_directories(cytube_tests PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party")
+target_compile_definitions(cytube_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+add_test(NAME cytube_tests COMMAND cytube_tests)
