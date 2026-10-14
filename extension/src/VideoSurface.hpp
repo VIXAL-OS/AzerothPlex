@@ -192,6 +192,8 @@ namespace wxl_video_screen
         float signCenter_ = 0.5f; // the design's middle (u)
         float signAspect_ = 0.25f; // the sign texture's height / width
         bool stonewallFailed_ = false;
+        float signInk_[4]{ 0.0f, 1.0f, 0.0f, 1.0f }; // where the sign's tubes are in its texture: u0, u1, v0, v1
+        float signSize_ = 0.95f;                     // the tubes' width over the screen's
         int cinemaMode_ = 0;
         uint32_t ambientColor_ = 0xFF202020u;
         DWORD lastAmbientSampleAt_ = 0;

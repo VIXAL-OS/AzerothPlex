@@ -752,7 +752,7 @@ namespace wxl_video_screen
                << '\t' << pinned_ << '\t' << pinnedLeft_ << '\t' << pinnedTop_
                << '\t' << pinnedWidth_ << '\t' << aspectRatioMode_ << '\t' << fitMode_
                << '\t' << frameStyle_ << '\t' << ambientLighting_ << '\t' << spatialAudio_
-               << '\t' << silentDistance_ << '\t' << stonewall_ << '\n';
+               << '\t' << silentDistance_ << '\t' << stonewall_ << '\t' << signSize_ << '\n';
         output.close();
         if (!output) return;
         MoveFileExW(temporary.c_str(), target.c_str(),
@@ -829,6 +829,8 @@ namespace wxl_video_screen
         if (input.peek() == '\t') { input.get(); if (!(input >> spatialAudio)) spatialAudio = 1; }
         if (input.peek() == '\t') { input.get(); if (!(input >> silentDistance)) silentDistance = 60.0f; }
         if (input.peek() == '\t') { input.get(); if (!(input >> stonewall)) stonewall = 0; }
+        float signSize = 0.95f;
+        if (input.peek() == '\t') { input.get(); if (!(input >> signSize)) signSize = 0.95f; }
 
         const float rightLength = std::sqrt(right[0] * right[0] + right[1] * right[1]);
         if (map < 0 || !Finite3(center) || !(rightLength > 0.9f && rightLength < 1.1f) ||
@@ -855,6 +857,7 @@ namespace wxl_video_screen
         frameStyle_ = std::clamp(frameStyle, 0, 8);
         ambientLighting_ = ambientLighting ? 1 : 0;
         stonewall_ = stonewall ? 1 : 0;
+        signSize_ = std::isfinite(signSize) ? std::clamp(signSize, 0.4f, 1.6f) : 0.95f;
         spatialAudio_ = spatialAudio ? 1 : 0;
         silentDistance_ = std::isfinite(silentDistance) ? std::clamp(silentDistance, 10.0f, 200.0f) : 60.0f;
         placed_ = true;
@@ -1710,6 +1713,25 @@ namespace wxl_video_screen
         signArc_[0] = sign.arcU; signArc_[1] = sign.arcV; signArc_[2] = sign.arcInner; signArc_[3] = sign.arcOuter;
         signArc_[4] = sign.arcEnd;
         signCenter_ = sign.centerU;
+        {
+            int x0 = sign.w, x1 = -1, y0 = sign.h, y1 = -1;
+            for (int y = 0; y < sign.h; ++y)
+                for (int x = 0; x < sign.w; ++x)
+                {
+                    const size_t at = size_t(y) * sign.w + x;
+                    const uint32_t alpha = std::max(sign.pixels[at] >> 24, sign.tv.empty() ? 0u : sign.tv[at] >> 24);
+                    if (alpha < 64u) continue;
+                    x0 = std::min(x0, x); x1 = std::max(x1, x);
+                    y0 = std::min(y0, y); y1 = std::max(y1, y);
+                }
+            if (x1 >= x0 && y1 >= y0 && sign.w > 0 && sign.h > 0)
+            {
+                signInk_[0] = static_cast<float>(x0) / sign.w;
+                signInk_[1] = static_cast<float>(x1 + 1) / sign.w;
+                signInk_[2] = static_cast<float>(y0) / sign.h;
+                signInk_[3] = static_cast<float>(y1 + 1) / sign.h;
+            }
+        }
         signAspect_ = sign.w > 0 ? static_cast<float>(sign.h) / sign.w : 0.25f;
         signTexture_ = MakeTexture(device, sign.w, sign.h, sign.pixels);
         tvTexture_ = MakeTexture(device, sign.w, sign.h, sign.tv);
@@ -1758,10 +1780,9 @@ namespace wxl_video_screen
 
         IDirect3DStateBlock9* state = nullptr;
         if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
-        IDirect3DSurface9* oldDepth = nullptr;
-        device->GetDepthStencilSurface(&oldDepth);
-        auto* sceneDepth = static_cast<IDirect3DSurface9*>(sceneDepthRaw);
-        if (sceneDepth) device->SetDepthStencilSurface(sceneDepth);
+        // Not depth-tested: at the end of the world pass that rejected every pixel in game (and took the player names,
+        // drawn next, with it), while untested drawing there is fine.
+        (void)sceneDepthRaw;
 
         device->SetTransform(D3DTS_WORLD, &world);
         device->SetTransform(D3DTS_VIEW, &view);
@@ -1798,7 +1819,7 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
         device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
         device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-        device->SetRenderState(D3DRS_ZENABLE, sceneDepth && depthTest_ ? D3DZB_TRUE : D3DZB_FALSE);
+        device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
         device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
         DWORD noBias = 0;
         device->SetRenderState(D3DRS_DEPTHBIAS, noBias);
@@ -1818,16 +1839,20 @@ namespace wxl_video_screen
             device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(Vertex));
         };
 
-        // Above the screen (its height follows the aspect setting) and above whatever frame is drawn round it: the tallest
-        // frames reach about 2.1 rails over the top (a rail is 6% of the half-height), the ambient halo about 2.9.
+        // On the frame: the top of the screen (its height follows the aspect setting) plus however far the frame's top rail
+        // reaches over it (a rail is 6% of the half-height).
+        static constexpr float kFrameTopRails[9] = { 0.0f, 1.65f, 1.95f, 1.42f, 1.35f, 2.05f, 1.75f, 2.10f, 0.85f };
         const float W = width_, halfHeight = W * 0.5f / ScreenAspectRatio(), rail = halfHeight * 0.06f;
-        const float top = halfHeight + (frameStyle_ > 0 ? rail * 2.2f : 0.0f);
+        const float top = halfHeight + rail * kFrameTopRails[std::clamp(frameStyle_, 0, 8)];
         const float t = static_cast<float>(GetTickCount() % 3600000u) / 1000.0f;
 
         // The sign, centred above the screen. The rainbow and "Stonewall" hum; "TV" is a tube on its way out: every few
         // seconds it stutters (60 ms on/off for about half a second).
-        const float signW = W * 0.78f, signH = signW * signAspect_, signZ = top + W * 0.01f;
-        const float left = -signW * signCenter_; // the design (not the texture) centred
+        // Sized and placed by the tubes, not the texture round them: their width signSize_ of the screen's, centred, their
+        // bottom on the frame (texture v runs down from signZ + signH to signZ).
+        const float signW = W * signSize_ / std::max(0.05f, signInk_[1] - signInk_[0]), signH = signW * signAspect_;
+        const float signZ = top - (1.0f - signInk_[3]) * signH;
+        const float left = -signW * 0.5f * (signInk_[0] + signInk_[1]);
         const float hum = 0.93f + 0.07f * std::sin(t * 1.3f);
         quad(signTexture_, left, left + signW, signZ, signZ + signH, 0.0f, 1.0f, 0.0f, Grey(hum));
         const uint32_t epoch = static_cast<uint32_t>(t / 7.0f);
@@ -1856,8 +1881,6 @@ namespace wxl_video_screen
         }
         device->SetTexture(0, nullptr);
 
-        device->SetDepthStencilSurface(oldDepth);
-        if (oldDepth) oldDepth->Release();
         state->Apply();
         state->Release();
     }
@@ -1921,8 +1944,15 @@ namespace wxl_video_screen
         for (int zone = 0; zone < kGlowZones; ++zone)
             for (int c = 0; c < 3; ++c) glow_[zone][c] += (glowTarget_[zone][c] - glow_[zone][c]) * follow;
 
+        // From the frame's outer edge (the ring of each style, in rails: 3.5% of the half-width across, 6% of the
+        // half-height up and down; ornaments past it just get some of the light), so it never washes over the picture.
+        static constexpr float kSideRails[9] = { 0.0f, 1.65f, 1.25f, 0.80f, 1.35f, 0.65f, 1.25f, 1.15f, 0.85f };
+        static constexpr float kTopRails[9] = { 0.0f, 1.65f, 1.25f, 0.80f, 1.35f, 0.65f, 1.25f, 2.10f, 0.85f };
+        const int style = std::clamp(frameStyle_, 0, 8);
         const float halfWidth = width_ * 0.5f, halfHeight = halfWidth / ScreenAspectRatio();
-        const float innerW = halfWidth * 0.98f, innerH = halfHeight * 0.98f, spread = halfHeight * 0.6f;
+        const float innerW = halfWidth + halfWidth * 0.035f * kSideRails[style];
+        const float innerH = halfHeight + halfHeight * 0.06f * kTopRails[style];
+        const float spread = halfHeight * 0.6f;
         static constexpr float kStep[4] = { 0.0f, 0.15f, 0.45f, 1.0f };
         static constexpr float kFade[4] = { 1.0f, 0.55f, 0.18f, 0.0f };
         static constexpr float kStrength = 0.75f;
@@ -1973,7 +2003,7 @@ namespace wxl_video_screen
         wxl::game::camera::GetPosition(eye);
         float toward[3] = { right_[1], -right_[0], 0.0f };
         if ((eye[0] - center_[0]) * toward[0] + (eye[1] - center_[1]) * toward[1] < 0.0f) { toward[0] = -toward[0]; toward[1] = -toward[1]; }
-        constexpr float lift = -0.04f; // behind the screen
+        constexpr float lift = -0.02f; // just behind the frame's plane
         const auto vertex = [&](int a, int b) {
             const Line& column = across[a];
             const Line& row = down[b];
@@ -2002,10 +2032,9 @@ namespace wxl_video_screen
 
         IDirect3DStateBlock9* state = nullptr;
         if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
-        IDirect3DSurface9* oldDepth = nullptr;
-        device->GetDepthStencilSurface(&oldDepth);
-        auto* sceneDepth = static_cast<IDirect3DSurface9*>(sceneDepthRaw);
-        if (sceneDepth) device->SetDepthStencilSurface(sceneDepth);
+        // Not depth-tested: at the end of the world pass that rejected every pixel in game (and took the player names,
+        // drawn next, with it), while untested drawing there is fine.
+        (void)sceneDepthRaw;
 
         device->SetTransform(D3DTS_WORLD, &world);
         device->SetTransform(D3DTS_VIEW, &view);
@@ -2035,14 +2064,12 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
         device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
         device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-        device->SetRenderState(D3DRS_ZENABLE, sceneDepth && depthTest_ ? D3DZB_TRUE : D3DZB_FALSE);
+        device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
         device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
         DWORD noBias = 0;
         device->SetRenderState(D3DRS_DEPTHBIAS, noBias);
         device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(count / 3), triangles, sizeof(Vertex));
 
-        device->SetDepthStencilSurface(oldDepth);
-        if (oldDepth) oldDepth->Release();
         state->Apply();
         state->Release();
     }
@@ -2876,6 +2903,9 @@ namespace wxl_video_screen
         cinemaVisualChanged = api_->UiCheckbox("Ambient screen glow", &ambientLighting_) != 0 || cinemaVisualChanged;
         cinemaVisualChanged = api_->UiCheckbox("Stonewall TV: neon sign with a glittery rainbow", &stonewall_) != 0 ||
                               cinemaVisualChanged;
+        if (stonewall_)
+            cinemaVisualChanged = api_->UiSliderFloat("Stonewall sign width (x screen)", &signSize_, 0.4f, 1.6f) != 0 ||
+                                  cinemaVisualChanged;
         if (cinemaVisualChanged && placed_) SavePlacement();
         if (api_->UiCheckbox("Cinema mode (compact viewing controls)", &cinemaMode_))
         {
