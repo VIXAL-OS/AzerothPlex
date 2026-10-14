@@ -851,7 +851,10 @@ namespace wxl_video_screen
         const auto temporary = target.wstring() + L".tmp";
         std::ofstream output(temporary, std::ios::trunc);
         if (!output) return;
-        output << "azerothplex-ui-v1\t" << (miniPlayerEnabled_ ? 1 : 0) << '\n';
+        std::string channel(cytubeChannel_);
+        for (char& c : channel)
+            if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+        output << "azerothplex-ui-v1\t" << (miniPlayerEnabled_ ? 1 : 0) << '\t' << channel << '\n';
         output.close();
         if (output)
             MoveFileExW(temporary.c_str(), target.c_str(),
@@ -870,6 +873,12 @@ namespace wxl_video_screen
             !(input >> miniPlayerEnabled))
             return;
         miniPlayerEnabled_ = miniPlayerEnabled ? 1 : 0;
+        std::string channel;
+        if (input.get() == '\t' && std::getline(input, channel))
+        {
+            if (!channel.empty() && channel.back() == '\r') channel.pop_back();
+            strncpy_s(cytubeChannel_, channel.c_str(), _TRUNCATE);
+        }
     }
 
     void VideoSurface::LoadCinemaPresets()
@@ -2299,6 +2308,65 @@ namespace wxl_video_screen
         }
     }
 
+    void VideoSurface::DrawCytubeSection()
+    {
+        const bool hostUp = FindWindowW(kHostWindowClass, nullptr) && RefreshUiState();
+        const auto& cy = uiState_.cytube;
+        if (!hostUp || !cy.active)
+        {
+            api_->UiInputText("CyTube channel (cytu.be/r/...)", cytubeChannel_, sizeof(cytubeChannel_));
+            if (api_->UiButton("Join CyTube channel") && cytubeChannel_[0])
+            {
+                SaveUiPreferences();
+                SendUiCommand(wxl_video_shared::UiCommand::JoinCytube, -1, 0, cytubeChannel_);
+            }
+            return;
+        }
+
+        static constexpr const char* kStates[] = {"idle", "connecting", "joined", "reconnecting", "stopped"};
+        const char* state = cy.state >= 0 && cy.state < 5 ? kStates[cy.state] : "?";
+        char line[320]{};
+        std::snprintf(line, sizeof(line), "CyTube: %s (%s)", cy.channel, state);
+        api_->UiText(line);
+        if (cy.title[0])
+        {
+            if (cy.live)
+                std::snprintf(line, sizeof(line), "%s (live)", cy.title);
+            else if (cy.durationMs > 0)
+            {
+                char current[32]{}, total[32]{};
+                FormatTime(current, sizeof(current), static_cast<uint32_t>(std::max<LONG>(0, cy.positionMs)));
+                FormatTime(total, sizeof(total), static_cast<uint32_t>(cy.durationMs));
+                std::snprintf(line, sizeof(line), "%s  %s / %s", cy.title, current, total);
+            }
+            else
+                std::snprintf(line, sizeof(line), "%s", cy.title);
+            api_->UiText(line);
+        }
+        if (cy.status[0]) api_->UiText(cy.status);
+        if (cy.playable && !cy.live && !cy.loading && !cy.paused)
+        {
+            const LONG drift = cy.driftMs < 0 ? -cy.driftMs : cy.driftMs;
+            if (drift <= 500)
+                std::snprintf(line, sizeof(line), "In sync with the channel (%.1f s).", drift / 1000.0);
+            else
+                std::snprintf(line, sizeof(line), "Catching up: %.1f s %s the channel.", drift / 1000.0,
+                              cy.driftMs > 0 ? "behind" : "ahead of");
+            api_->UiText(line);
+        }
+        if (cy.needPassword)
+        {
+            api_->UiInputText("Channel password", cytubePassword_, sizeof(cytubePassword_));
+            if (api_->UiButton("Send password") && cytubePassword_[0])
+            {
+                SendUiCommand(wxl_video_shared::UiCommand::CytubePassword, -1, 0, cytubePassword_);
+                SecureZeroMemory(cytubePassword_, sizeof(cytubePassword_));
+            }
+        }
+        if (api_->UiButton("Leave CyTube channel"))
+            SendUiCommand(wxl_video_shared::UiCommand::LeaveCytube);
+    }
+
     void VideoSurface::DrawPlexPanel()
     {
         if (!FindWindowW(kHostWindowClass, nullptr))
@@ -2356,10 +2424,13 @@ namespace wxl_video_screen
             if (OpenHost()) plexPanelOpen_ = true;
         }
 
+        DrawCytubeSection();
+        api_->UiSeparator();
+
         if (!plexPanelOpen_)
         {
             if (miniPlayerEnabled_) DrawMiniPlayer();
-            if (!uiState_.playingItem.title[0])
+            if (!uiState_.playingItem.title[0] && !uiState_.cytube.active)
             {
                 if (api_->UiButton("Play"))
                     SendCommand(static_cast<LONG>(wxl_video_shared::Command::Play));

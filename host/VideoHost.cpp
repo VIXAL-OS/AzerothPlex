@@ -252,9 +252,9 @@ namespace
                 case wxl_video_shared::Command::Show:
                 case wxl_video_shared::Command::Hide:
                     break;
-                case wxl_video_shared::Command::Play: g_player.Play(); break;
-                case wxl_video_shared::Command::Pause: g_player.Pause(); break;
-                case wxl_video_shared::Command::Stop: g_player.Stop(); break;
+                case wxl_video_shared::Command::Play: if (!g_ui.CytubeMode()) g_player.Play(); break;
+                case wxl_video_shared::Command::Pause: if (!g_ui.CytubeMode()) g_player.Pause(); break;
+                case wxl_video_shared::Command::Stop: if (!g_ui.CytubeMode()) g_player.Stop(); break;
                 default: break;
                 }
                 g_lastCommandSequence = commandSequence;

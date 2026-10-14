@@ -66,6 +66,7 @@ namespace wxl_ui
         // CyTube mode: the channel's media and clock drive the player (a second SyncController, CyTube's thresholds).
         void ConfigureCytube(wxl_cytube::CytubeClient& cytube, wxl_party::SyncController& sync);
         void PumpCytubeEvents();
+        bool CytubeMode() const { return cytubeMode_; }
         void HandleUiCommand(const wxl_video_shared::UiCommandPacket& command);
         void PublishUiState(wxl_video_shared::UiSnapshot& snapshot) const;
         void Draw();

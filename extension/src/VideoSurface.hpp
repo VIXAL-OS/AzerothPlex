@@ -48,6 +48,7 @@ namespace wxl_video_screen
         void DrawPlexQueue();
         void DrawPlexSettings();
         void DrawMiniPlayer();
+        void DrawCytubeSection();
         bool OpenHost();
         void HideHost();
         void CloseHost();
@@ -95,6 +96,8 @@ namespace wxl_video_screen
         wxl_video_shared::UiSnapshot uiState_{};
         char search_[wxl_video_shared::kUiTextBytes]{};
         char partyCode_[32]{};
+        char cytubeChannel_[wxl_video_shared::kUiTextBytes]{};
+        char cytubePassword_[128]{};
         float scrubPositionSeconds_ = 0.0f;
         DWORD lastScrubAt_ = 0;
         bool plexPanelOpen_ = false;
