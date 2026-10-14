@@ -1194,24 +1194,9 @@ namespace wxl_video_screen
         MemoryBarrier();
         if (header->slotSequence[active] != before) return texture_ != nullptr;
 
-        if (ambientLighting_ && GetTickCount() - lastAmbientSampleAt_ >= 500)
+        if (ambientLighting_ && GetTickCount() - lastAmbientSampleAt_ >= 100)
         {
-            uint64_t red = 0, green = 0, blue = 0, samples = 0;
-            constexpr size_t sampleStep = 4 * 1024;
-            for (size_t offset = 0; offset + 3 < frameScratch_.size(); offset += sampleStep)
-            {
-                blue += frameScratch_[offset + 0];
-                green += frameScratch_[offset + 1];
-                red += frameScratch_[offset + 2];
-                ++samples;
-            }
-            if (samples)
-            {
-                const uint32_t r = static_cast<uint32_t>(std::min<uint64_t>(255, red / samples));
-                const uint32_t g = static_cast<uint32_t>(std::min<uint64_t>(255, green / samples));
-                const uint32_t b = static_cast<uint32_t>(std::min<uint64_t>(255, blue / samples));
-                ambientColor_ = 0xFF000000u | (r << 16) | (g << 8) | b;
-            }
+            SampleGlow();
             lastAmbientSampleAt_ = GetTickCount();
         }
 
@@ -1427,7 +1412,7 @@ namespace wxl_video_screen
             if (frameStyle_ > 0 || ambientLighting_)
             {
                 borderResult = DrawDecorativeFrame(
-                    frameStyle_, halfWidth, halfHeight, ambientLighting_ != 0,
+                    frameStyle_, halfWidth, halfHeight, false,
                     static_cast<D3DCOLOR>(ambientColor_),
                     [&](float left, float right, float bottom, float top, D3DCOLOR color)
                     {
@@ -1649,6 +1634,7 @@ namespace wxl_video_screen
             DrawPinnedScreen(static_cast<IDirect3DDevice9*>(args.device));
         else
         {
+            DrawAmbientGlow(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth);
             if (!depthTest_)
                 DrawWorldScreen(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth, false);
             DrawStonewall(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth);
@@ -1835,7 +1821,7 @@ namespace wxl_video_screen
         // Above the screen (its height follows the aspect setting) and above whatever frame is drawn round it: the tallest
         // frames reach about 2.1 rails over the top (a rail is 6% of the half-height), the ambient halo about 2.9.
         const float W = width_, halfHeight = W * 0.5f / ScreenAspectRatio(), rail = halfHeight * 0.06f;
-        const float top = halfHeight + (ambientLighting_ ? rail * 2.95f : frameStyle_ > 0 ? rail * 2.2f : 0.0f);
+        const float top = halfHeight + (frameStyle_ > 0 ? rail * 2.2f : 0.0f);
         const float t = static_cast<float>(GetTickCount() % 3600000u) / 1000.0f;
 
         // The sign, centred above the screen. The rainbow and "Stonewall" hum; "TV" is a tube on its way out: every few
@@ -1869,6 +1855,191 @@ namespace wxl_video_screen
                  Grey(flash));
         }
         device->SetTexture(0, nullptr);
+
+        device->SetDepthStencilSurface(oldDepth);
+        if (oldDepth) oldDepth->Release();
+        state->Apply();
+        state->Release();
+    }
+
+    // The picture's edges in zones: a band 15% deep along each edge, every third pixel each way (BGRA, top row first).
+    void VideoSurface::SampleGlow()
+    {
+        constexpr int width = static_cast<int>(wxl_video_shared::kWidth), height = static_cast<int>(wxl_video_shared::kHeight);
+        constexpr size_t stride = wxl_video_shared::kStride;
+        if (frameScratch_.size() < stride * height) return;
+        const auto average = [&](int x0, int x1, int y0, int y1, float* out) {
+            uint64_t red = 0, green = 0, blue = 0, count = 0;
+            for (int y = y0; y < y1; y += 3)
+                for (int x = x0; x < x1; x += 3)
+                {
+                    const uint8_t* pixel = frameScratch_.data() + size_t(y) * stride + size_t(x) * 4;
+                    blue += pixel[0];
+                    green += pixel[1];
+                    red += pixel[2];
+                    ++count;
+                }
+            const float scale = count ? 1.0f / (255.0f * static_cast<float>(count)) : 0.0f;
+            out[0] = red * scale;
+            out[1] = green * scale;
+            out[2] = blue * scale;
+        };
+        const int bandX = width * 15 / 100, bandY = height * 15 / 100;
+        for (int i = 0; i < kGlowAcross; ++i)
+        {
+            const int x0 = width * i / kGlowAcross, x1 = width * (i + 1) / kGlowAcross;
+            average(x0, x1, 0, bandY, glowTarget_[i]);
+            average(x0, x1, height - bandY, height, glowTarget_[kGlowAcross + i]);
+        }
+        for (int i = 0; i < kGlowDown; ++i)
+        {
+            const int y0 = height * i / kGlowDown, y1 = height * (i + 1) / kGlowDown;
+            average(0, bandX, y0, y1, glowTarget_[2 * kGlowAcross + i]);
+            average(width - bandX, width, y0, y1, glowTarget_[2 * kGlowAcross + kGlowDown + i]);
+        }
+        float mean[3]{};
+        for (const auto& zone : glowTarget_)
+            for (int c = 0; c < 3; ++c) mean[c] += zone[c] / kGlowZones;
+        const auto byte = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+        ambientColor_ = 0xFF000000u | (byte(mean[0]) << 16) | (byte(mean[1]) << 8) | byte(mean[2]);
+        glowSampled_ = true;
+    }
+
+    // A soft additive ring in the edge colours, a little behind the screen: grid lines three deep outside each edge
+    // (fading 1, 0.55, 0.18, 0) and at the zone boundaries along it; every cell but the inner ones is drawn. Positions are
+    // (h, z) in the screen's plane as for the sign: h toward the picture's right (u), z up.
+    void VideoSurface::DrawAmbientGlow(IDirect3DDevice9* device, void* sceneDepthRaw)
+    {
+        if (!device || !placed_ || !visible_ || !ambientLighting_ || !glowSampled_ ||
+            wxl::game::world::CurrentMapId() != mapId_)
+            return;
+
+        const DWORD now = GetTickCount();
+        const float dt = lastGlowDrawAt_ ? std::min(0.5f, (now - lastGlowDrawAt_) / 1000.0f) : 10.0f;
+        lastGlowDrawAt_ = now;
+        const float follow = 1.0f - std::exp(-dt / 0.3f);
+        for (int zone = 0; zone < kGlowZones; ++zone)
+            for (int c = 0; c < 3; ++c) glow_[zone][c] += (glowTarget_[zone][c] - glow_[zone][c]) * follow;
+
+        const float halfWidth = width_ * 0.5f, halfHeight = halfWidth / ScreenAspectRatio();
+        const float innerW = halfWidth * 0.98f, innerH = halfHeight * 0.98f, spread = halfHeight * 0.6f;
+        static constexpr float kStep[4] = { 0.0f, 0.15f, 0.45f, 1.0f };
+        static constexpr float kFade[4] = { 1.0f, 0.55f, 0.18f, 0.0f };
+        static constexpr float kStrength = 0.75f;
+
+        struct Line { float at; int fade; };
+        const auto lines = [&](float inner, int zones, Line* out) {
+            int n = 0;
+            for (int i = 3; i >= 1; --i) out[n++] = { -(inner + spread * kStep[i]), i };
+            for (int k = 0; k <= zones; ++k) out[n++] = { -inner + 2.0f * inner * k / zones, 0 };
+            for (int i = 1; i <= 3; ++i) out[n++] = { inner + spread * kStep[i], i };
+            return n;
+        };
+        Line across[kGlowAcross + 7], down[kGlowDown + 7];
+        const int columns = lines(innerW, kGlowAcross, across), rows = lines(innerH, kGlowDown, down);
+
+        // An edge's colour at t (0..1 along it), between its zones' centres.
+        const auto along = [&](int first, int zones, float t, float* out) {
+            const float x = std::clamp(t, 0.0f, 1.0f) * zones - 0.5f;
+            const int i0 = std::clamp(static_cast<int>(std::floor(x)), 0, zones - 1), i1 = std::min(i0 + 1, zones - 1);
+            const float f = std::clamp(x - static_cast<float>(i0), 0.0f, 1.0f);
+            for (int c = 0; c < 3; ++c) out[c] = glow_[first + i0][c] + (glow_[first + i1][c] - glow_[first + i0][c]) * f;
+        };
+        const auto colourAt = [&](const Line& column, const Line& row) -> D3DCOLOR {
+            const float h = std::clamp(column.at, -innerW, innerW), z = std::clamp(row.at, -innerH, innerH);
+            const float u = (h + innerW) / (2.0f * innerW), v = (innerH - z) / (2.0f * innerH);
+            const bool topBottom = row.fade > 0 || std::abs(row.at) >= innerH * 0.999f;
+            const bool side = column.fade > 0 || std::abs(column.at) >= innerW * 0.999f;
+            float rgb[3]{}, other[3]{};
+            const int horizontal = z > 0.0f ? 0 : kGlowAcross;                                 // top or bottom zones
+            const int vertical = 2 * kGlowAcross + (h > 0.0f ? kGlowDown : 0);                // left or right zones
+            if (topBottom) along(horizontal, kGlowAcross, u, rgb);
+            if (side)
+            {
+                along(vertical, kGlowDown, v, other);
+                for (int c = 0; c < 3; ++c) rgb[c] = topBottom ? 0.5f * (rgb[c] + other[c]) : other[c];
+            }
+            const float alpha = kStrength * kFade[column.fade] * kFade[row.fade];
+            // A little more saturated than the picture, as a glow reads.
+            const float luma = 0.30f * rgb[0] + 0.59f * rgb[1] + 0.11f * rgb[2];
+            const auto byte = [&](float value) {
+                return static_cast<uint32_t>(std::clamp(luma + (value - luma) * 1.4f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            const uint32_t a = static_cast<uint32_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+            return (a << 24) | (byte(rgb[0]) << 16) | (byte(rgb[1]) << 8) | byte(rgb[2]);
+        };
+
+        float eye[3]{};
+        wxl::game::camera::GetPosition(eye);
+        float toward[3] = { right_[1], -right_[0], 0.0f };
+        if ((eye[0] - center_[0]) * toward[0] + (eye[1] - center_[1]) * toward[1] < 0.0f) { toward[0] = -toward[0]; toward[1] = -toward[1]; }
+        constexpr float lift = -0.04f; // behind the screen
+        const auto vertex = [&](int a, int b) {
+            const Line& column = across[a];
+            const Line& row = down[b];
+            return Vertex{ center_[0] - right_[0] * column.at + toward[0] * lift,
+                           center_[1] - right_[1] * column.at + toward[1] * lift,
+                           center_[2] + row.at, colourAt(column, row), 0.0f, 0.0f };
+        };
+        Vertex triangles[(kGlowAcross + 6) * (kGlowDown + 6) * 6];
+        int count = 0;
+        for (int a = 0; a + 1 < columns; ++a)
+            for (int b = 0; b + 1 < rows; ++b)
+            {
+                if (a >= 3 && a < 3 + kGlowAcross && b >= 3 && b < 3 + kGlowDown) continue; // behind the picture
+                const Vertex v00 = vertex(a, b), v10 = vertex(a + 1, b), v01 = vertex(a, b + 1), v11 = vertex(a + 1, b + 1);
+                triangles[count++] = v00; triangles[count++] = v10; triangles[count++] = v01;
+                triangles[count++] = v10; triangles[count++] = v11; triangles[count++] = v01;
+            }
+
+        D3DMATRIX world{};
+        world._11 = world._22 = world._33 = world._44 = 1.0f;
+        world._41 = -eye[0];
+        world._42 = -eye[1];
+        world._43 = -eye[2];
+        D3DMATRIX view{}, projection{};
+        if (!wxl::game::gfx::SceneMatrices(&view._11, &projection._11)) return;
+
+        IDirect3DStateBlock9* state = nullptr;
+        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
+        IDirect3DSurface9* oldDepth = nullptr;
+        device->GetDepthStencilSurface(&oldDepth);
+        auto* sceneDepth = static_cast<IDirect3DSurface9*>(sceneDepthRaw);
+        if (sceneDepth) device->SetDepthStencilSurface(sceneDepth);
+
+        device->SetTransform(D3DTS_WORLD, &world);
+        device->SetTransform(D3DTS_VIEW, &view);
+        device->SetTransform(D3DTS_PROJECTION, &projection);
+        device->SetVertexShader(nullptr);
+        device->SetPixelShader(nullptr);
+        device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        device->SetTexture(0, nullptr);
+        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD);
+        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+        device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+        device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+        device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE); // light: adds, never darkens
+        device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_CLIPPING, TRUE);
+        device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
+        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_ZENABLE, sceneDepth && depthTest_ ? D3DZB_TRUE : D3DZB_FALSE);
+        device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        DWORD noBias = 0;
+        device->SetRenderState(D3DRS_DEPTHBIAS, noBias);
+        device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(count / 3), triangles, sizeof(Vertex));
 
         device->SetDepthStencilSurface(oldDepth);
         if (oldDepth) oldDepth->Release();

@@ -51,6 +51,9 @@ namespace wxl_video_screen
         void DrawCytubeSection();
         // Stonewall TV: a neon "Stonewall TV" sign above the screen, its rainbow glittering.
         void DrawStonewall(IDirect3DDevice9* device, void* sceneDepth);
+        // Ambient glow: the picture's edge colours as a soft light just behind the world screen.
+        void SampleGlow();
+        void DrawAmbientGlow(IDirect3DDevice9* device, void* sceneDepth);
         bool EnsureStonewallTextures(IDirect3DDevice9* device);
         void ReleaseStonewallTextures();
         bool OpenHost();
@@ -192,6 +195,13 @@ namespace wxl_video_screen
         int cinemaMode_ = 0;
         uint32_t ambientColor_ = 0xFF202020u;
         DWORD lastAmbientSampleAt_ = 0;
+        static constexpr int kGlowAcross = 6; // zones along the top and the bottom edge
+        static constexpr int kGlowDown = 4;   // zones down each side
+        static constexpr int kGlowZones = 2 * (kGlowAcross + kGlowDown); // top, bottom, left, right (picture u/v order)
+        float glowTarget_[kGlowZones][3]{};   // sampled, 0..1
+        float glow_[kGlowZones][3]{};         // eased toward it
+        bool glowSampled_ = false;
+        DWORD lastGlowDrawAt_ = 0;
         std::string lastSharedCinemaSignature_;
         std::string status_ = "Waiting for the cinema helper.";
 
