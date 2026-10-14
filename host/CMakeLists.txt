@@ -123,3 +123,10 @@ target_include_directories(cytube_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/third_party")
 target_compile_definitions(cytube_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 add_test(NAME cytube_tests COMMAND cytube_tests)
+
+add_executable(cytube_probe tests/CytubeProbe.cpp CytubeClient.cpp CytubeProtocol.cpp PartyTypes.cpp)
+target_include_directories(cytube_probe PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party")
+target_compile_definitions(cytube_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_link_libraries(cytube_probe PRIVATE winhttp)
