@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CytubeClient.hpp"
 #include "FramePublisher.hpp"
 #include "MpvPlayer.hpp"
 #include "PartyClient.hpp"
@@ -62,6 +63,9 @@ namespace wxl_ui
         void HandleMpvEvents(const std::vector<wxl_mpv::MpvEvent>& events);
         void PumpPlexEvents();
         void PumpPartyEvents();
+        // CyTube mode: the channel's media and clock drive the player (a second SyncController, CyTube's thresholds).
+        void ConfigureCytube(wxl_cytube::CytubeClient& cytube, wxl_party::SyncController& sync);
+        void PumpCytubeEvents();
         void HandleUiCommand(const wxl_video_shared::UiCommandPacket& command);
         void PublishUiState(wxl_video_shared::UiSnapshot& snapshot) const;
         void Draw();
@@ -97,6 +101,10 @@ namespace wxl_ui
                                                          const wxl_plex::PlexItem& item);
         static wxl_plex::PlexItem PlexHintFor(const wxl_party::MediaIdentity& media);
         void OpenItem(const wxl_plex::PlexItem& item);
+        void StartCytubeMedia();
+        void ApplyCytubeClock(bool afterLoad);
+        void HandleCytubeMpvEvent(const wxl_mpv::MpvEvent& event);
+        void LeaveCytube(const std::string& why);
         void NavigateBack();
         void LoadPage(int offset);
 
@@ -157,5 +165,23 @@ namespace wxl_ui
         bool liveAudioActive_ = false;
         uint32_t liveAudioFramesReceived_ = 0;
         std::string status_ = "Starting Plex helper.";
+
+        // CyTube mode.
+        wxl_cytube::CytubeClient* cytube_ = nullptr;
+        wxl_party::SyncController* cytubeSync_ = nullptr;
+        bool cytubeMode_ = false;
+        wxl_cytube::ChannelRef cytubeChannel_;
+        wxl_cytube::Media cytubeMedia_;
+        wxl_cytube::Playable cytubePlayable_;
+        bool cytubeHaveMedia_ = false;
+        bool cytubeLoading_ = false;
+        bool cytubeAskedAgain_ = false;
+        bool cytubeNeedPassword_ = false;
+        bool cytubeWrongPassword_ = false;
+        double cytubeTime_ = 0.0;      // the channel's clock as last heard (s; < 0: the lead-in)
+        bool cytubePaused_ = false;
+        int64_t cytubeHeardAtMs_ = 0;  // when (system clock)
+        uint64_t cytubeEpoch_ = 0, cytubeSequence_ = 0;
+        std::string cytubeStatus_;
     };
 }

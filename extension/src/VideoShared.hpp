@@ -67,7 +67,7 @@ namespace wxl_video_shared
 
     constexpr wchar_t kUiMappingName[] = L"Local\\WXLVideoCinemaUi-v1";
     constexpr uint32_t kUiMagic = 0x55565857u; // "WXVU"
-    constexpr uint32_t kUiVersion = 5;
+    constexpr uint32_t kUiVersion = 6; // 6: CyTube (three commands, UiCytubeSnapshot)
     constexpr size_t kUiTextBytes = 256;
     constexpr size_t kUiErrorBytes = 192;
     constexpr size_t kUiStatusBytes = 192;
@@ -145,6 +145,9 @@ namespace wxl_video_shared
         StopLive,
         WatchLive,
         StopWatchingLive,
+        JoinCytube,       // text: a channel link or name
+        LeaveCytube,
+        CytubePassword,   // text: the channel's password
     };
 
     struct UiServerSnapshot
@@ -242,6 +245,27 @@ namespace wxl_video_shared
         char text[kUiTextBytes]{};
     };
 
+    // CyTube mode (the host follows a CyTube channel: cytu.be/r/<channel>).
+    struct UiCytubeSnapshot
+    {
+        LONG active = 0;        // a channel joined (or being joined)
+        LONG state = 0;         // wxl_cytube::ClientState
+        LONG needPassword = 0;
+        LONG wrongPassword = 0;
+        LONG playable = 0;      // the current media plays here
+        LONG live = 0;
+        LONG paused = 0;
+        LONG loading = 0;
+        LONG positionMs = 0;
+        LONG durationMs = 0;
+        LONG driftMs = 0;
+        LONG reserved = 0;
+        char channel[32]{};
+        char type[8]{};
+        char title[128]{};
+        char status[kUiStatusBytes]{};
+    };
+
     struct UiSnapshot
     {
         uint32_t structBytes = sizeof(UiSnapshot);
@@ -316,6 +340,7 @@ namespace wxl_video_shared
         UiPartyMemberSnapshot partyMembers[kUiMaxPartyMembers]{};
         UiPartyQueueSnapshot partyQueue[kUiMaxPartyQueue]{};
         UiPublicRoomSnapshot publicRooms[kUiMaxPublicRooms]{};
+        UiCytubeSnapshot cytube{}; // (last: appended in v6)
     };
 
     struct UiBridge
@@ -397,6 +422,10 @@ namespace wxl_video_shared
                 stream.language[sizeof(stream.language) - 1] = '\0';
                 stream.title[sizeof(stream.title) - 1] = '\0';
             }
+            result.cytube.channel[sizeof(result.cytube.channel) - 1] = '\0';
+            result.cytube.type[sizeof(result.cytube.type) - 1] = '\0';
+            result.cytube.title[sizeof(result.cytube.title) - 1] = '\0';
+            result.cytube.status[sizeof(result.cytube.status) - 1] = '\0';
             if (bridge->slotSequence[active] == slotSequence &&
                 bridge->sequence == sequence &&
                 result.structBytes == sizeof(UiSnapshot))

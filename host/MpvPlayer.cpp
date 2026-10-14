@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <malloc.h>
 #include <string>
@@ -142,6 +143,7 @@ namespace wxl_mpv
             api_->setOptionString(handle_, "cache", "yes") < 0 ||
             api_->setOptionString(handle_, "network-timeout", "30") < 0 ||
             api_->setOptionString(handle_, "idle", "yes") < 0 ||
+            !ConfigureYtdl() ||
             api_->initialize(handle_) < 0)
         {
             Shutdown();
@@ -158,6 +160,38 @@ namespace wxl_mpv
             Shutdown();
             return false;
         }
+        return true;
+    }
+
+    // mpv's yt-dlp hook, for CyTube's YouTube, Vimeo, Twitch and similar media: yt-dlp.exe next to this exe if it's
+    // there, else the one on PATH (the hook's own search); Node for YouTube's challenges when it's installed; at most
+    // 480p, H.264 first (the shared frame is 640 x 360 and decoding is in software).
+    bool MpvPlayer::ConfigureYtdl()
+    {
+        if (api_->setOptionString(handle_, "ytdl", "yes") < 0 ||
+            api_->setOptionString(handle_, "ytdl-format",
+                                  "bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=480]/bv*[height<=480]+ba/b") < 0)
+            return false;
+        wchar_t modulePath[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        if (length > 0 && length < MAX_PATH)
+        {
+            const auto local = std::filesystem::path(modulePath).parent_path() / L"yt-dlp.exe";
+            std::error_code error;
+            if (std::filesystem::exists(local, error))
+            {
+                const std::wstring wide = local.wstring();
+                const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                std::string path(static_cast<size_t>(std::max(0, bytes)), '\0');
+                if (bytes > 0) WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, path.data(), bytes, nullptr, nullptr);
+                if (!path.empty() && path.back() == '\0') path.pop_back();
+                if (path.find(',') == std::string::npos) // (script-opts are comma-separated)
+                    api_->setOptionString(handle_, "script-opts", ("ytdl_hook-ytdl_path=" + path).c_str());
+            }
+        }
+        wchar_t node[MAX_PATH]{};
+        if (SearchPathW(nullptr, L"node.exe", nullptr, MAX_PATH, node, nullptr) > 0)
+            api_->setOptionString(handle_, "ytdl-raw-options", "js-runtimes=node");
         return true;
     }
 
@@ -207,6 +241,16 @@ namespace wxl_mpv
         if (!IsInitialized() || playback.uri.empty()) return false;
         lastPositionSeconds_ = 0.0;
         Command({"loadfile", playback.uri, "replace"});
+        return true;
+    }
+
+    bool MpvPlayer::LoadUrl(const std::string& url, double startSeconds, bool paused)
+    {
+        if (!IsInitialized() || url.empty()) return false;
+        lastPositionSeconds_ = std::max(0.0, startSeconds);
+        char start[64]{};
+        std::snprintf(start, sizeof(start), "start=%.3f,pause=%s", lastPositionSeconds_, paused ? "yes" : "no");
+        Command({"loadfile", url, "replace", "-1", start});
         return true;
     }
 

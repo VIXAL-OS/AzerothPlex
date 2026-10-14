@@ -2,6 +2,7 @@
 // Copyright (C) 2026 WarcraftXL contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "CytubeClient.hpp"
 #include "FramePublisher.hpp"
 #include "LiveAudio.hpp"
 #include "LiveCodec.hpp"
@@ -58,6 +59,8 @@ namespace
     std::unique_ptr<wxl_party::SessionStore> g_partyStore;
     std::unique_ptr<wxl_party::PartyClient> g_party;
     wxl_party::SyncController g_sync;
+    std::unique_ptr<wxl_cytube::CytubeClient> g_cytube;
+    wxl_party::SyncController g_cytubeSync;
     wxl_ui::NativeUi g_ui;
     wxl_live::LiveEncoder g_liveEncoder;
     wxl_live::LiveDecoder g_liveDecoder;
@@ -332,6 +335,7 @@ namespace
         g_ui.HandleMpvEvents(events);
         g_ui.PumpPlexEvents();
         g_ui.PumpPartyEvents();
+        g_ui.PumpCytubeEvents();
         ProcessUiCommand();
 
         const bool broadcastingLive = g_ui.LiveBroadcasting();
@@ -588,6 +592,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int)
     }
 
     g_ui.ConfigureParty(*g_party, g_sync, *g_partyStore, partySettings);
+    g_cytube = std::make_unique<wxl_cytube::CytubeClient>();
+    g_ui.ConfigureCytube(*g_cytube, g_cytubeSync);
     g_ui.Hide();
     SetTimer(g_window, kTickTimer, kTickIntervalMs, nullptr);
     if (g_parentProcess) CreateThread(nullptr, 0, WatchParentProcess, nullptr, 0, nullptr);
@@ -600,6 +606,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int)
     }
 
     if (g_party) g_party->Disconnect();
+    if (g_cytube) g_cytube->Leave();
     g_liveAudioCapture.Stop();
     g_liveAudioEncoder.Shutdown();
     g_liveAudioDecoder.Shutdown();
@@ -609,6 +616,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int)
     wxl_live::ShutdownMediaFoundation();
     g_ui.Shutdown();
     g_player.Shutdown();
+    g_cytube.reset();
     g_party.reset();
     g_partyStore.reset();
     g_plex.reset();

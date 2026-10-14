@@ -48,6 +48,9 @@ namespace wxl_mpv
         bool Initialize(HWND window, ID3D11Device* device, ID3D11DeviceContext* context);
         void Shutdown();
         bool Load(const wxl_plex::PlexPlayback& playback);
+        // Any URL mpv (or its yt-dlp hook: "ytdl://..." or a YouTube / Twitch link) can open, from startSeconds, paused
+        // or playing (CyTube).
+        bool LoadUrl(const std::string& url, double startSeconds, bool paused);
         void Play();
         void Pause();
         void Stop();
@@ -69,6 +72,7 @@ namespace wxl_mpv
         struct Api;
 
         bool LoadApi();
+        bool ConfigureYtdl();
         void Command(const std::vector<std::string>& arguments);
         void SetProperty(std::string name, std::string value);
         void ApplySpeed();

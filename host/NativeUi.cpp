@@ -725,6 +725,189 @@ namespace wxl_ui
         applyingRemote_ = false;
     }
 
+    void NativeUi::ConfigureCytube(wxl_cytube::CytubeClient& cytube, wxl_party::SyncController& sync)
+    {
+        cytube_ = &cytube;
+        cytubeSync_ = &sync;
+        // CyTube's clock comes every 5 s with no server timestamp: nudge past 0.5 s, seek past 2.5 s (its own player
+        // only seeks past 2 s).
+        cytubeSync_->SetThresholds(500, 2500);
+    }
+
+    void NativeUi::LeaveCytube(const std::string& why)
+    {
+        if (cytube_) cytube_->Leave();
+        if (cytubeMode_ && player_) player_->Stop();
+        cytubeMode_ = false;
+        cytubeHaveMedia_ = false;
+        cytubeLoading_ = false;
+        cytubeNeedPassword_ = false;
+        cytubeWrongPassword_ = false;
+        cytubeMedia_ = {};
+        cytubePlayable_ = {};
+        stopped_ = true;
+        paused_ = false;
+        if (player_) player_->SetSyncCorrection(1.0);
+        cytubeStatus_ = why;
+    }
+
+    // A new item from the channel: what mpv opens, from where the channel's clock is now.
+    void NativeUi::StartCytubeMedia()
+    {
+        if (!player_) return;
+        cytubePlayable_ = wxl_cytube::ResolvePlayable(cytubeMedia_);
+        cytubeAskedAgain_ = false;
+        if (cytubeSync_) cytubeSync_->Reset();
+        player_->SetSyncCorrection(1.0);
+        if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
+        {
+            player_->Stop();
+            cytubeLoading_ = false;
+            stopped_ = true;
+            cytubeStatus_ = "Can't play \"" + cytubeMedia_.title + "\" here (" + cytubePlayable_.reason + "); waiting for the next one.";
+            return;
+        }
+        double start = cytubeTime_;
+        if (!cytubePaused_ && start >= 0.0)
+            start += std::max<int64_t>(0, wxl_cytube::CytubeClient::NowMs() - cytubeHeardAtMs_) / 1000.0;
+        const bool startPaused = cytubePaused_ || cytubeTime_ < 0.0;
+        player_->LoadUrl(cytubePlayable_.url, cytubePlayable_.live ? 0.0 : std::max(0.0, start), startPaused);
+        cytubeLoading_ = true;
+        stopped_ = false;
+        paused_ = startPaused;
+        lastPositionSeconds_ = std::max(0.0, start);
+        cytubeStatus_ = (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Ytdl ? "Looking up \"" : "Loading \"") +
+                        cytubeMedia_.title + "\"...";
+    }
+
+    // The channel's clock against the player (each mediaUpdate; once more when a load finishes, since it took seconds).
+    void NativeUi::ApplyCytubeClock(bool afterLoad)
+    {
+        if (!player_ || !cytubeSync_ || !cytubeHaveMedia_ || cytubeLoading_ || cytubePlayable_.live ||
+            cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
+            return;
+        ++cytubeSequence_;
+        const auto remote = wxl_cytube::ToPlaybackState(cytubeChannel_, cytubeMedia_, cytubeTime_, cytubePaused_,
+                                                        cytubeHeardAtMs_, cytubeEpoch_, cytubeSequence_);
+        cytubeSync_->SetBaseSpeed(player_->PlaybackSpeed());
+        const auto decision = cytubeSync_->EvaluateRemoteState(
+            remote, wxl_cytube::CytubeClient::NowMs(), static_cast<int64_t>(std::max(0.0, lastPositionSeconds_) * 1000.0),
+            paused_ || stopped_, wxl_cytube::IdentityFor(cytubeChannel_, cytubeMedia_), afterLoad);
+        if (!decision.accepted) return;
+        const double base = std::max(0.25, player_->PlaybackSpeed());
+        player_->SetSyncCorrection(decision.effectiveSpeed / base);
+        if (decision.shouldSeek)
+        {
+            player_->Seek(decision.targetPositionMs / 1000.0);
+            lastPositionSeconds_ = decision.targetPositionMs / 1000.0;
+        }
+        if (decision.shouldPause) { player_->Pause(); paused_ = true; }
+        else if (decision.shouldPlay) { player_->Play(); paused_ = false; }
+        stopped_ = false;
+    }
+
+    void NativeUi::HandleCytubeMpvEvent(const wxl_mpv::MpvEvent& event)
+    {
+        using Kind = wxl_mpv::MpvEvent::Kind;
+        if (event.kind == Kind::PositionChanged)
+        {
+            lastPositionSeconds_ = std::max(0.0, event.positionSeconds);
+        }
+        else if (event.kind == Kind::Loaded)
+        {
+            if (!cytubeLoading_) return;
+            cytubeLoading_ = false;
+            cytubeStatus_ = "Playing \"" + cytubeMedia_.title + "\".";
+            if (cytubePlayable_.live) { player_->Play(); paused_ = false; }
+            else ApplyCytubeClock(true);
+        }
+        else if (event.kind == Kind::Error || (event.kind == Kind::Ended && cytubeLoading_))
+        {
+            cytubeLoading_ = false;
+            if (!cytubeAskedAgain_ && cytube_)
+            {
+                // Once per item: ask the channel for its media again (a stale link, a hiccup).
+                cytubeAskedAgain_ = true;
+                cytube_->RequestMedia();
+                cytubeStatus_ = "Couldn't play \"" + cytubeMedia_.title + "\"; trying again.";
+            }
+            else
+            {
+                stopped_ = true;
+                cytubeStatus_ = "Couldn't play \"" + cytubeMedia_.title + "\"" +
+                                (event.message.empty() ? std::string{} : " (" + event.message + ")") + "; waiting for the next one.";
+            }
+        }
+        else if (event.kind == Kind::Ended)
+        {
+            stopped_ = true;
+            cytubeStatus_ = "Waiting for the channel's next item.";
+        }
+    }
+
+    void NativeUi::PumpCytubeEvents()
+    {
+        if (!cytube_) return;
+        wxl_cytube::ClientEvent event;
+        while (cytube_->PopEvent(event))
+        {
+            if (!cytubeMode_) continue;
+            using Kind = wxl_cytube::ClientEvent::Kind;
+            switch (event.kind)
+            {
+            case Kind::State:
+                if (!cytubeHaveMedia_ || event.state != wxl_cytube::ClientState::Joined)
+                    cytubeStatus_ = std::string(wxl_cytube::ToString(event.state)) + (event.text.empty() ? "." : ": " + event.text);
+                break;
+            case Kind::ChangeMedia:
+            {
+                wxl_cytube::Media media;
+                std::string error;
+                if (!wxl_cytube::ParseChangeMedia(event.text, media, error)) { cytubeStatus_ = error; break; }
+                const bool same = cytubeHaveMedia_ && media.type == cytubeMedia_.type && media.id == cytubeMedia_.id &&
+                                  !cytubeAskedAgain_;
+                cytubeMedia_ = media;
+                cytubeHaveMedia_ = true;
+                cytubeTime_ = media.currentTime;
+                cytubePaused_ = media.paused;
+                cytubeHeardAtMs_ = event.receivedAtMs;
+                if (same && !stopped_) { ApplyCytubeClock(false); break; } // the same item again (a rejoin): just sync
+                ++cytubeEpoch_;
+                cytubeSequence_ = 0;
+                StartCytubeMedia();
+                break;
+            }
+            case Kind::MediaUpdate:
+            {
+                double time = 0.0;
+                bool paused = false;
+                if (!wxl_cytube::ParseMediaUpdate(event.text, time, paused)) break;
+                cytubeTime_ = time;
+                cytubePaused_ = paused;
+                cytubeHeardAtMs_ = event.receivedAtMs;
+                ApplyCytubeClock(false);
+                break;
+            }
+            case Kind::NeedPassword:
+                cytubeNeedPassword_ = true;
+                cytubeWrongPassword_ = event.text == "true";
+                cytubeStatus_ = cytubeWrongPassword_ ? "Wrong password; try again." : "This channel needs a password.";
+                break;
+            case Kind::PasswordAccepted:
+                cytubeNeedPassword_ = false;
+                cytubeWrongPassword_ = false;
+                cytubeStatus_ = "Password accepted.";
+                break;
+            case Kind::Message:
+                cytubeStatus_ = event.text;
+                break;
+            case Kind::Kicked:
+                LeaveCytube("Removed from the channel: " + event.text);
+                break;
+            }
+        }
+    }
+
     void NativeUi::PumpPartyEvents()
     {
         if (!party_ || !sync_) return;
@@ -918,8 +1101,55 @@ namespace wxl_ui
         if (!plex_ || !player_) return;
         state_.error.clear();
 
-        switch (static_cast<wxl_video_shared::UiCommand>(command.command))
+        const auto commandId = static_cast<wxl_video_shared::UiCommand>(command.command);
+        if (cytubeMode_ && (commandId == wxl_video_shared::UiCommand::Play || commandId == wxl_video_shared::UiCommand::Pause ||
+                            commandId == wxl_video_shared::UiCommand::Stop || commandId == wxl_video_shared::UiCommand::Seek ||
+                            commandId == wxl_video_shared::UiCommand::PlayQueueItem ||
+                            commandId == wxl_video_shared::UiCommand::PlayNextEpisode))
         {
+            state_.error = "The CyTube channel controls playback; leave the channel to play from Plex.";
+            return;
+        }
+        if (cytubeMode_ && (commandId == wxl_video_shared::UiCommand::CreateParty ||
+                            commandId == wxl_video_shared::UiCommand::CreatePublicParty ||
+                            commandId == wxl_video_shared::UiCommand::JoinParty ||
+                            commandId == wxl_video_shared::UiCommand::JoinPublicRoom))
+        {
+            state_.error = "Leave the CyTube channel before a watch party.";
+            return;
+        }
+        switch (commandId)
+        {
+        case wxl_video_shared::UiCommand::JoinCytube:
+        {
+            if (!cytube_) { state_.error = "CyTube isn't available in this player."; break; }
+            if (party_ && !party_->Room().code.empty()) { state_.error = "Leave the watch party before joining a CyTube channel."; break; }
+            wxl_cytube::ChannelRef channel;
+            std::string error;
+            if (!wxl_cytube::ParseChannelRef(BoundedText(command.text, sizeof(command.text)), channel, error))
+            {
+                state_.error = error;
+                break;
+            }
+            if (cytubeMode_) LeaveCytube({});
+            if (player_) player_->Stop();
+            playingItem_ = {};
+            nextEpisode_ = {};
+            autoplayDeadline_ = 0;
+            cytubeMode_ = true;
+            cytubeChannel_ = channel;
+            cytubeStatus_ = "Joining " + channel.channel + ".";
+            cytube_->Join(channel);
+            status_ = "CyTube: " + channel.channel + ".";
+            break;
+        }
+        case wxl_video_shared::UiCommand::LeaveCytube:
+            LeaveCytube("Left the channel.");
+            status_ = "Left the CyTube channel.";
+            break;
+        case wxl_video_shared::UiCommand::CytubePassword:
+            if (cytube_ && cytubeMode_) cytube_->SendPassword(BoundedText(command.text, sizeof(command.text)));
+            break;
         case wxl_video_shared::UiCommand::StartLogin:
             status_ = "Opening Plex sign-in in your browser.";
             plex_->StartLogin();
@@ -1752,6 +1982,26 @@ namespace wxl_ui
             CopyText(snapshot.partyCorrection, wxl_party::ToString(sync_->LastCorrection()));
         }
 
+        if (cytubeMode_)
+        {
+            auto& cy = snapshot.cytube;
+            cy.active = 1;
+            cy.state = cytube_ ? static_cast<LONG>(cytube_->State()) : 0;
+            cy.needPassword = cytubeNeedPassword_ ? 1 : 0;
+            cy.wrongPassword = cytubeWrongPassword_ ? 1 : 0;
+            cy.playable = cytubeHaveMedia_ && cytubePlayable_.kind != wxl_cytube::Playable::Kind::Unsupported ? 1 : 0;
+            cy.live = cytubePlayable_.live ? 1 : 0;
+            cy.paused = paused_ ? 1 : 0;
+            cy.loading = cytubeLoading_ ? 1 : 0;
+            cy.positionMs = static_cast<LONG>(std::clamp(lastPositionSeconds_ * 1000.0, 0.0, 2.0e9));
+            cy.durationMs = static_cast<LONG>(std::clamp(cytubeMedia_.seconds * 1000.0, 0.0, 2.0e9));
+            cy.driftMs = cytubeSync_ ? static_cast<LONG>(std::clamp<int64_t>(cytubeSync_->LastDriftMs(), -2000000000, 2000000000)) : 0;
+            CopyText(cy.channel, cytubeChannel_.channel);
+            CopyText(cy.type, cytubeMedia_.type);
+            CopyText(cy.title, cytubeMedia_.title);
+            CopyText(cy.status, cytubeStatus_);
+        }
+
         snapshot.publicRoomCount = static_cast<uint32_t>(std::min(
             publicRooms_.size(), wxl_video_shared::kUiMaxPublicRooms));
         for (uint32_t index = 0; index < snapshot.publicRoomCount; ++index)
@@ -1767,6 +2017,11 @@ namespace wxl_ui
     {
         for (const auto& event : events)
         {
+            if (cytubeMode_)
+            {
+                HandleCytubeMpvEvent(event);
+                continue;
+            }
             if (event.kind == wxl_mpv::MpvEvent::Kind::PositionChanged)
             {
                 lastPositionSeconds_ = std::max(0.0, event.positionSeconds);

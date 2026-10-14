@@ -20,7 +20,7 @@ set(IMGUI_SOURCES
 add_executable(wxl-video-host WIN32
     VideoHost.cpp FramePublisher.cpp MpvPlayer.cpp PlexClient.cpp TokenStore.cpp NativeUi.cpp
     PartyTypes.cpp PartyProtocol.cpp SyncController.cpp SessionStore.cpp PartyClient.cpp
-    LiveCodec.cpp LiveAudio.cpp
+    LiveCodec.cpp LiveAudio.cpp CytubeProtocol.cpp CytubeClient.cpp
     ${IMGUI_SOURCES})
 target_include_directories(wxl-video-host PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}"
@@ -74,7 +74,8 @@ target_link_libraries(mpv_player_tests PRIVATE d3d11 dxgi user32)
 add_test(NAME mpv_player_tests COMMAND mpv_player_tests)
 
 add_executable(native_ui_tests tests/NativeUiTests.cpp NativeUi.cpp MpvPlayer.cpp PlexClient.cpp TokenStore.cpp FramePublisher.cpp
-    PartyTypes.cpp PartyProtocol.cpp SyncController.cpp SessionStore.cpp PartyClient.cpp ${IMGUI_SOURCES})
+    PartyTypes.cpp PartyProtocol.cpp SyncController.cpp SessionStore.cpp PartyClient.cpp CytubeProtocol.cpp CytubeClient.cpp
+    ${IMGUI_SOURCES})
 target_include_directories(native_ui_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}"
     "${MPV_ROOT}/include"
