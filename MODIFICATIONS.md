@@ -28,4 +28,5 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
   the world with the projection the world is rendered with (the graphics device's second matrix) and the world
   pass's depth range, instead of the projection the device was given and the viewport's range. At the end of the
   scene the screen doesn't swap the depth surface either.
+- **State put back whole, and only the world pass touched:** every state block is captured right after it is created (`CreateStateBlock` alone gives the shaders' float constants above c127 back wrong on this machine's D3D9 runtime). The screen drawn before the world goes only into the world pass's own clear, into the depth surface the world is drawn with, and the frame is uploaded at the end of the scene, not inside the pass.
 - **Tests:** `host/tests/CytubeTests.cpp` (protocol) and `host/tests/CytubeProbe.cpp` (a live channel probe).

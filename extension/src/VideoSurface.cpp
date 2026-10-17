@@ -78,6 +78,25 @@ namespace wxl_video_screen
             return std::isfinite(z) && z > 0.5f && z <= 1.0f ? z : 1.0f;
         }
 
+        // A state block holding everything as it is now. CreateStateBlock(D3DSBT_ALL) alone records the vertex
+        // shader's float constants c128..c255 and the pixel shader's c128..c223 wrong: Apply() then writes copies
+        // of c0..c127 / c0..c95 there (this machine's D3D9 runtime, on the GeForce and the Radeon alike, 2026-10-17;
+        // every other state comes back intact). Capture() right after records them properly -- Dear ImGui's DX9
+        // backend does the same (its issue #3857). Drawn before the world, the screen left those registers wrong for
+        // the world pass: whatever was set there before it and not set again (the client's model shaders read
+        // c224..c235, for one) read copies of the low registers instead.
+        HRESULT CaptureState(IDirect3DDevice9* device, IDirect3DStateBlock9** state)
+        {
+            *state = nullptr;
+            HRESULT result = device->CreateStateBlock(D3DSBT_ALL, state);
+            if (SUCCEEDED(result) && *state && FAILED(result = (*state)->Capture()))
+            {
+                (*state)->Release();
+                *state = nullptr;
+            }
+            return result;
+        }
+
         struct ScreenVertex
         {
             float x, y, z, rhw;
@@ -320,6 +339,7 @@ namespace wxl_video_screen
     VideoSurface::VideoSurface()
     {
         on<&VideoSurface::OnFrame>(wxl::events::Event::OnFrame);
+        on<&VideoSurface::OnWorldRender>(wxl::events::Event::OnWorldRender);
         on<&VideoSurface::OnWorldSceneEnd>(wxl::events::Event::OnWorldSceneEnd);
         on<&VideoSurface::OnInput>(wxl::events::Event::OnInput);
         on<&VideoSurface::OnUpdate>(wxl::events::Event::OnUpdate);
@@ -358,11 +378,15 @@ namespace wxl_video_screen
         if (originalSceneClear_) originalSceneClear_(flags, colour);
 
         auto& self = Instance();
+        // Only the world pass's own clear (some twenty callers clear colour and depth, shadow maps and portraits among
+        // them): after OnWorldRender, into the depth surface the world is drawn with. Without that event (an older core)
+        // the first such clear of the frame, as before.
         if (self.preWorldDrawn_ || self.pinned_ || !self.initialized_ || !self.depthTest_ || !self.visible_ ||
             !self.placed_ || (flags & (wxl::game::gx::clear::kColor |
                                       wxl::game::gx::clear::kDepth)) !=
                              (wxl::game::gx::clear::kColor |
                               wxl::game::gx::clear::kDepth) ||
+            (self.worldRenderEvents_ && !self.gateOff_ && !self.inWorldPass_) ||
             wxl::game::world::CurrentMapId() != self.mapId_)
             return;
 
@@ -371,14 +395,33 @@ namespace wxl_video_screen
 
         IDirect3DSurface9* depth = nullptr;
         device->GetDepthStencilSurface(&depth);
-        self.DrawWorldScreen(device, depth, true);
+        if (!self.worldRenderEvents_ || self.gateOff_ || (depth && depth == self.worldPassDepth_))
+        {
+            self.DrawWorldScreen(device, depth, true);
+            self.preWorldDrawn_ = true;
+        }
         if (depth) depth->Release();
-        self.preWorldDrawn_ = true;
     }
 
     void VideoSurface::OnFrame(const wxl::events::FrameArgs&)
     {
         preWorldDrawn_ = false;
+    }
+
+    void VideoSurface::OnWorldRender(const wxl::events::WorldRenderArgs& args)
+    {
+        ++worldRenderEvents_;
+        inWorldPass_ = true;
+        worldPassDepth_ = nullptr;
+        if (auto* device = static_cast<IDirect3DDevice9*>(args.device))
+        {
+            IDirect3DSurface9* depth = nullptr;
+            if (SUCCEEDED(device->GetDepthStencilSurface(&depth)) && depth)
+            {
+                worldPassDepth_ = depth; // compared by address only, never used
+                depth->Release();
+            }
+        }
     }
 
     void VideoSurface::OnInput(const wxl::events::InputArgs& args)
@@ -1271,7 +1314,8 @@ namespace wxl_video_screen
             return;
 
         ++drawAttempts_;
-        UploadLatestFrame(device);
+        // Before the world only the draw itself: the frame is uploaded at the end of the scene (OnWorldSceneEnd).
+        if (!beforeWorld) UploadLatestFrame(device);
 
         const float halfWidth = width_ * 0.5f;
         const float halfHeight = halfWidth / ScreenAspectRatio();
@@ -1312,7 +1356,7 @@ namespace wxl_video_screen
         };
 
         IDirect3DStateBlock9* state = nullptr;
-        const HRESULT stateResult = device->CreateStateBlock(D3DSBT_ALL, &state);
+        const HRESULT stateResult = CaptureState(device, &state);
         lastStateResult_ = stateResult;
         if (FAILED(stateResult) || !state)
         {
@@ -1588,7 +1632,7 @@ namespace wxl_video_screen
         };
 
         IDirect3DStateBlock9* state = nullptr;
-        const HRESULT stateResult = device->CreateStateBlock(D3DSBT_ALL, &state);
+        const HRESULT stateResult = CaptureState(device, &state);
         lastStateResult_ = stateResult;
         if (FAILED(stateResult) || !state) return;
 
@@ -1680,6 +1724,19 @@ namespace wxl_video_screen
     void VideoSurface::OnWorldSceneEnd(const wxl::events::WorldSceneEndArgs& args)
     {
         ++worldSceneCalls_;
+        inWorldPass_ = false;
+        // The gate above should match every world pass; if it never does (another module drawing the world into a
+        // depth surface of its own, say), fall back to the first colour + depth clear of the frame rather than lose
+        // the screen.
+        if (depthTest_ && visible_ && placed_ && !gateOff_ && worldRenderEvents_ && !pinned_ && wxl::game::world::CurrentMapId() == mapId_)
+        {
+            gateMisses_ = preWorldDrawn_ ? 0u : gateMisses_ + 1u;
+            if (gateMisses_ >= 300u)
+            {
+                gateOff_ = true;
+                if (api_) api_->Log(WXL_LOG_WARN, kTag, "pre-world screen: the world pass's clear never matched its depth surface; drawing at the first colour and depth clear of the frame instead");
+            }
+        }
         if (!loggedFirstWorldScene_ && api_)
         {
             api_->Log(WXL_LOG_INFO, kTag,
@@ -1692,10 +1749,13 @@ namespace wxl_video_screen
             DrawPinnedScreen(static_cast<IDirect3DDevice9*>(args.device));
         else
         {
-            DrawAmbientGlow(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth);
+            auto* device = static_cast<IDirect3DDevice9*>(args.device);
+            if (depthTest_ && device && placed_ && visible_ && wxl::game::world::CurrentMapId() == mapId_)
+                UploadLatestFrame(device); // for the next frame's pre-world screen (and the glow's samples)
+            DrawAmbientGlow(device, args.sceneDepth);
             if (!depthTest_)
-                DrawWorldScreen(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth, false);
-            DrawStonewall(static_cast<IDirect3DDevice9*>(args.device), args.sceneDepth);
+                DrawWorldScreen(device, args.sceneDepth, false);
+            DrawStonewall(device, args.sceneDepth);
         }
     }
 
@@ -1834,7 +1894,7 @@ namespace wxl_video_screen
         if (!wxl::game::gfx::SceneMatrices(&view._11, &projection._11)) return;
 
         IDirect3DStateBlock9* state = nullptr;
-        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
+        if (FAILED(CaptureState(device, &state)) || !state) return;
         // Not depth-tested: at the end of the world pass that rejected every pixel in game (and took the player names,
         // drawn next, with it), while untested drawing there is fine.
         (void)sceneDepthRaw;
@@ -2086,7 +2146,7 @@ namespace wxl_video_screen
         if (!wxl::game::gfx::SceneMatrices(&view._11, &projection._11)) return;
 
         IDirect3DStateBlock9* state = nullptr;
-        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) || !state) return;
+        if (FAILED(CaptureState(device, &state)) || !state) return;
         // Not depth-tested: at the end of the world pass that rejected every pixel in game (and took the player names,
         // drawn next, with it), while untested drawing there is fine.
         (void)sceneDepthRaw;
