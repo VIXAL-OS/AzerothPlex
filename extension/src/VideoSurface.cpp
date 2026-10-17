@@ -49,6 +49,35 @@ namespace wxl_video_screen
             float u, v;
         };
 
+        // The world pass's own projection and depth range (Living Azeroth verified both in the client, 2026-10-02; the
+        // disassembly agrees):
+        //  - the graphics device keeps the projection it was GIVEN at +0xF88 (what gfx::SceneMatrices returns) and the
+        //    one it RENDERS with at +0xFC8: its set-projection routine 0x6A9B40 recomputes the depth terms (stored at
+        //    0x6A9CED), and the shader system (0x872C10) hands the world that one. The same x and y, so the same place
+        //    on screen; but a depth that isn't the world's, so the screen and the characters in front of it were
+        //    compared by two different measures.
+        //  - the world render (0x4F8EA0) sets viewport z = 0..[0xADEEE4] (a static 0.94) at 0x4F905A, before the scene
+        //    render's own clear (0x79AB9A, where the pre-world screen is drawn), and puts 0..1 back before
+        //    OnWorldSceneEnd.
+        constexpr size_t kDeviceRenderProjection = 0xFC8;
+        constexpr uintptr_t kWorldPassMaxZ = 0x00ADEEE4;
+
+        bool RenderProjection(float projection[16])
+        {
+            const void* graphics = wxl::game::gx::RawGraphicsDevice();
+            if (!graphics) return false;
+            std::memcpy(projection, static_cast<const uint8_t*>(graphics) + kDeviceRenderProjection, 16 * sizeof(float));
+            for (int i = 0; i < 16; ++i)
+                if (!std::isfinite(projection[i])) return false;
+            return projection[11] != 0.0f; // a perspective (w = view z), as the world's always is
+        }
+
+        float WorldPassMaxZ()
+        {
+            const float z = *reinterpret_cast<const volatile float*>(kWorldPassMaxZ);
+            return std::isfinite(z) && z > 0.5f && z <= 1.0f ? z : 1.0f;
+        }
+
         struct ScreenVertex
         {
             float x, y, z, rhw;
@@ -1296,10 +1325,17 @@ namespace wxl_video_screen
             }
             return;
         }
-        IDirect3DSurface9* oldDepth = nullptr;
-        device->GetDepthStencilSurface(&oldDepth);
+        // Depth-tested only before the world: the freshly cleared depth is seeded with the screen, and nearer characters
+        // and props then draw over it. At the end of the scene (only the through-world mode draws there) it isn't, and
+        // the depth surface is left alone, as the sign and the glow leave it (754023c): the world text batch is next.
         auto* sceneDepth = static_cast<IDirect3DSurface9*>(sceneDepthRaw);
-        if (sceneDepth) device->SetDepthStencilSurface(sceneDepth);
+        const bool depthTested = sceneDepth && beforeWorld;
+        IDirect3DSurface9* oldDepth = nullptr;
+        if (depthTested)
+        {
+            device->GetDepthStencilSurface(&oldDepth);
+            device->SetDepthStencilSurface(sceneDepth);
+        }
 
         // Build 12340 creates a pure D3D9 device, so GetTransform is unavailable.  Use WarcraftXL's
         // exact scene-matrix bank while the world-scene-end event still owns it.  Camera globals are
@@ -1317,11 +1353,28 @@ namespace wxl_video_screen
         D3DMATRIX projection{};
         if (!wxl::game::gfx::SceneMatrices(&view._11, &projection._11))
         {
-            device->SetDepthStencilSurface(oldDepth);
-            if (oldDepth) oldDepth->Release();
+            if (depthTested)
+            {
+                device->SetDepthStencilSurface(oldDepth);
+                if (oldDepth) oldDepth->Release();
+            }
             state->Apply();
             state->Release();
             return;
+        }
+        // The projection the world is rendered with, not the one it was given (see RenderProjection): the same place
+        // on screen either way, but only this one gives the world's depth.
+        float rendered[16];
+        if (RenderProjection(rendered)) std::memcpy(&projection._11, rendered, sizeof(rendered));
+        if (depthTested)
+        {
+            D3DVIEWPORT9 viewport{};
+            if (SUCCEEDED(device->GetViewport(&viewport)))
+            {
+                viewport.MinZ = 0.0f;
+                viewport.MaxZ = WorldPassMaxZ();
+                device->SetViewport(&viewport);
+            }
         }
         const float* sceneView = &view._11;
         const float* sceneProjection = &projection._11;
@@ -1391,8 +1444,7 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0Fu);
         device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD);
         device->SetRenderState(D3DRS_ZWRITEENABLE, beforeWorld ? TRUE : FALSE);
-        device->SetRenderState(D3DRS_ZENABLE,
-                               sceneDepth && beforeWorld ? D3DZB_TRUE : D3DZB_FALSE);
+        device->SetRenderState(D3DRS_ZENABLE, depthTested ? D3DZB_TRUE : D3DZB_FALSE);
         // Seed the cleared depth buffer unconditionally; world geometry rendered afterward uses its
         // normal depth test and can overwrite the screen wherever it is closer to the camera.
         device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
@@ -1457,9 +1509,12 @@ namespace wxl_video_screen
             }
         }
 
-        device->SetDepthStencilSurface(oldDepth);
-        if (oldDepth) oldDepth->Release();
-        state->Apply();
+        if (depthTested)
+        {
+            device->SetDepthStencilSurface(oldDepth);
+            if (oldDepth) oldDepth->Release();
+        }
+        state->Apply(); // includes the viewport
         state->Release();
     }
 

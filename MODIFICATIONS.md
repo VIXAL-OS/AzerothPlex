@@ -4,7 +4,7 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
 `7b2d7bb`, licensed under GPL-3.0 (see [LICENSE](LICENSE)). The modifications are released under the same license.
 
 - **Who:** VIXAL-OS, with AI coding assistants (Claude and Codex).
-- **When:** 14 October 2026.
+- **When:** 14–17 October 2026.
 - **Target:** the 3.3.5a client (build 12340) with WarcraftXL, played on ChromieCraft.
 
 ## What changed
@@ -24,4 +24,8 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
 - **Ambient glow:** the screen's edges are sampled in zones ten times a second and eased over about 0.3 s. A soft
   additive ring in those colours is drawn around the frame. Neither the sign nor the glow depth-tests, so they show
   with "Characters and world appear in front" on.
+- **Depth that matches the world's:** with "Characters and world appear in front" on, the screen is drawn before
+  the world with the projection the world is rendered with (the graphics device's second matrix) and the world
+  pass's depth range, instead of the projection the device was given and the viewport's range. At the end of the
+  scene the screen doesn't swap the depth surface either.
 - **Tests:** `host/tests/CytubeTests.cpp` (protocol) and `host/tests/CytubeProbe.cpp` (a live channel probe).
