@@ -4,6 +4,7 @@
 
 #include "VideoSurface.hpp"
 
+#include "ScreenDepth.hpp"
 #include "StonewallArt.hpp"
 #include "VideoShared.hpp"
 
@@ -78,6 +79,7 @@ namespace wxl_video_screen
             return std::isfinite(z) && z > 0.5f && z <= 1.0f ? z : 1.0f;
         }
 
+        // Hooked calls.
         // What a state block can't put back for everyone else. wxl-modern-water patches the live device's SetRenderState
         // and SetDepthStencilSurface (its d3d9_wrap.cpp, "device adoption", for its shadow-map bias): it takes every
         // D3DRS_DEPTHBIAS and D3DRS_SLOPESCALEDEPTHBIAS that goes through SetRenderState for the client's own, raises the
@@ -90,18 +92,10 @@ namespace wxl_video_screen
         // Living Azeroth's snow cover, a few centimetres above the terrain with no bias of its own, lost the depth test
         // everywhere, and the shadow maps were drawn 0.01 toward the light (Video Cinema, 2026-10-19). At the end of the
         // scene the screen did the same for the next frame unless the sign's bias of 0 followed it.
-        // So nothing here sets a depth bias: the screen's offset goes into its projection (OffsetDepth), and depth writes
-        // are switched on only where the depth test is (with depth buffering off nothing is written).
-        // Window depth z' = z + bias with depth range r becomes NDC z' = z + bias / r, i.e. clip z' = z + w * bias / r.
-        void OffsetDepth(D3DMATRIX& projection, float bias, float range)
-        {
-            if (!(range > 0.0f) || bias == 0.0f) return;
-            const float k = bias / range;
-            projection._13 += k * projection._14;
-            projection._23 += k * projection._24;
-            projection._33 += k * projection._34;
-            projection._43 += k * projection._44;
-        }
+        // So nothing here sets a depth bias: the screen is pulled toward the camera in its projection, by yards
+        // (ScreenDepth.hpp: the leaked bias had moved the characters with the screen, so the same 0.010 in the
+        // projection alone put the screen in front of them), and depth writes are switched on only where the depth
+        // test is (with depth buffering off nothing is written).
 
         // A state block holding everything as it is now. CreateStateBlock(D3DSBT_ALL) alone records the vertex
         // shader's float constants c128..c255 and the pixel shader's c128..c223 wrong: Apply() then writes copies
@@ -1404,12 +1398,11 @@ namespace wxl_video_screen
         if (depthTested)
         {
             // The pre-world screen draws into the depth already bound (the hook passes it): no SetDepthStencilSurface
-            // then, which other modules hook (see OffsetDepth).
+            // then, which other modules hook (see "Hooked calls").
             device->GetDepthStencilSurface(&oldDepth);
             swapDepth = oldDepth != sceneDepth;
             if (swapDepth) device->SetDepthStencilSurface(sceneDepth);
         }
-        float depthRange = 1.0f;
 
         // Build 12340 creates a pure D3D9 device, so GetTransform is unavailable.  Use WarcraftXL's
         // exact scene-matrix bank while the world-scene-end event still owns it.  Camera globals are
@@ -1445,7 +1438,6 @@ namespace wxl_video_screen
                 viewport.MinZ = 0.0f;
                 viewport.MaxZ = WorldPassMaxZ();
                 device->SetViewport(&viewport);
-                depthRange = viewport.MaxZ - viewport.MinZ;
             }
         }
         const float* sceneView = &view._11;
@@ -1454,15 +1446,15 @@ namespace wxl_video_screen
         const float relativeCenter[4] = {
             center_[0] - eye[0], center_[1] - eye[1], center_[2] - eye[2], 1.0f
         };
+        // The whole view-space point first, then its projection (each clip column needs all four view components).
         float viewCenter[4]{};
         float clipCenter[4]{};
         for (int column = 0; column < 4; ++column)
-        {
             for (int row = 0; row < 4; ++row)
                 viewCenter[column] += relativeCenter[row] * sceneView[row * 4 + column];
+        for (int column = 0; column < 4; ++column)
             for (int row = 0; row < 4; ++row)
                 clipCenter[column] += viewCenter[row] * sceneProjection[row * 4 + column];
-        }
         projectedClipW_ = clipCenter[3];
         projectedCenterValid_ = std::isfinite(projectedClipW_) &&
                                 std::abs(projectedClipW_) > 0.0001f;
@@ -1474,10 +1466,19 @@ namespace wxl_video_screen
             projectedCenterValid_ = Finite3(projectedCenter_);
         }
 
-        // The depth offset (the panel's "Depth offset") in the projection, not as D3DRS_DEPTHBIAS (see OffsetDepth). It
-        // only matters where the screen is depth-tested.
+        // The panel's "Depth pull": the screen tested as if it stood that many yards nearer (at its centre, along the
+        // ray from the eye; ScreenDepth.hpp), in its projection, not as D3DRS_DEPTHBIAS ("Hooked calls"). It only
+        // matters where the screen is depth-tested. The world's view is a rotation about the camera (no translation), so
+        // the scale is about the eye, and the centre's distance from the camera is the one to pull it along.
         D3DMATRIX drawProjection = projection;
-        if (depthTested) OffsetDepth(drawProjection, depthBias_, depthRange);
+        if (depthTested)
+        {
+            const float distance = std::sqrt(relativeCenter[0] * relativeCenter[0] +
+                                             relativeCenter[1] * relativeCenter[1] +
+                                             relativeCenter[2] * relativeCenter[2]);
+            screen_depth::PullTowardEye(drawProjection,
+                                        screen_depth::PullScale(distance, screen_depth::PullYardsFromLegacy(depthBias_)));
+        }
         device->SetTransform(D3DTS_WORLD, &world);
         device->SetTransform(D3DTS_VIEW, &view);
         device->SetTransform(D3DTS_PROJECTION, &drawProjection);
@@ -1526,7 +1527,7 @@ namespace wxl_video_screen
         // Seed the cleared depth buffer unconditionally; world geometry rendered afterward uses its
         // normal depth test and can overwrite the screen wherever it is closer to the camera.
         device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
-        // No D3DRS_DEPTHBIAS: the offset is in drawProjection (OffsetDepth says why).
+        // No D3DRS_DEPTHBIAS: the pull is in drawProjection ("Hooked calls" says why).
 
         const HRESULT drawResult = device->DrawPrimitiveUP(
             D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(Vertex));
@@ -1695,7 +1696,7 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_LIGHTING, FALSE);
         device->SetRenderState(D3DRS_FOGENABLE, FALSE);
         device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-        device->SetRenderState(D3DRS_ZENABLE, FALSE); // depth buffering off: nothing written (no ZWRITEENABLE: OffsetDepth)
+        device->SetRenderState(D3DRS_ZENABLE, FALSE); // depth buffering off: nothing written (no ZWRITEENABLE: "Hooked calls")
         device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
         device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
         device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
@@ -1962,7 +1963,7 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
         device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
         // Depth buffering off: no depth test, nothing written. Neither ZWRITEENABLE nor DEPTHBIAS is set (other modules
-        // hook them and take what they see for the client's: OffsetDepth).
+        // hook them and take what they see for the client's: "Hooked calls").
         device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
 
         // Positions in the screen's plane: h yards toward the viewer's right of its centre (the screen's u runs that way:
@@ -2205,7 +2206,7 @@ namespace wxl_video_screen
         device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
         device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x07u);
         // Depth buffering off: no depth test, nothing written. Neither ZWRITEENABLE nor DEPTHBIAS is set (other modules
-        // hook them and take what they see for the client's: OffsetDepth).
+        // hook them and take what they see for the client's: "Hooked calls").
         device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
         device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(count / 3), triangles, sizeof(Vertex));
 
@@ -3085,9 +3086,14 @@ namespace wxl_video_screen
         {
             if (api_->UiCheckbox("Show physical screen", &visible_)) SavePlacement();
             if (api_->UiCheckbox("Characters and world appear in front", &depthTest_)) SavePlacement();
-            if (api_->UiSliderFloat("Depth offset (more negative brings screen forward)",
-                                    &depthBias_, -0.030f, 0.005f))
+            // Shown in yards; kept in the old units (ScreenDepth.hpp), as presets and shared cinemas carry it.
+            float depthPull = screen_depth::PullYardsFromLegacy(depthBias_);
+            if (api_->UiSliderFloat("Depth pull (yards toward the camera)", &depthPull, 0.0f,
+                                    screen_depth::kMaxPullYards))
+            {
+                depthBias_ = screen_depth::LegacyFromPullYards(depthPull);
                 SavePlacement();
+            }
             api_->UiCheckbox("Show yellow placement outline", &outline_);
             if (api_->UiButton("Rotate screen left 5 degrees")) Rotate(5.0f);
             if (api_->UiButton("Rotate screen right 5 degrees")) Rotate(-5.0f);

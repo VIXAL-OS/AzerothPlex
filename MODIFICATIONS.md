@@ -35,4 +35,10 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
   screen's bias for the client's own; a state block's restore doesn't pass through those hooks, so it wrote the bias
   back for the world pass after the shadow maps, and the terrain was drawn nearer than it is (Living Azeroth's snow
   cover vanished, shadows went wrong).
+- **Depth pull in yards:** the panel's "Depth pull" moves the depth-tested screen that many yards toward the camera
+  (default 0.05, at most 0.15), by scaling view space about the eye in its projection: the same pixels, only nearer
+  depth (`extension/src/ScreenDepth.hpp`). The old "Depth offset" of -0.010 had only looked right because the leaked
+  bias moved the characters with the screen; in the projection alone it brought a screen 18 yd away to 9 yd, over the
+  character standing in front of it. The value is still saved, kept in presets and shared with a party in its old
+  units (pull = -5 x the old value), so the old default -0.010 is 0.05 yd and older copies read the same numbers.
 - **Tests:** `host/tests/CytubeTests.cpp` (protocol) and `host/tests/CytubeProbe.cpp` (a live channel probe).

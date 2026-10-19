@@ -137,6 +137,8 @@ namespace wxl_video_screen
         int visible_ = 1;
         int depthTest_ = 1;
         int outline_ = 0;
+        // The old "Depth offset" value and units, as world-screen.tsv, presets, shared cinemas and the helper carry it; the
+        // screen's pull toward the camera is -5 x it in yards (ScreenDepth.hpp: -0.010 is 0.05 yd).
         float depthBias_ = -0.010f;
         int spatialAudio_ = 1;
         int masterVolume_ = 80;

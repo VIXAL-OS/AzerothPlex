@@ -91,7 +91,7 @@ object. In the in-game **Video Cinema** panel:
 - choose **Place / move screen in front of me**;
 - change **Screen width** to resize the 16:9 screen;
 - rotate, raise, lower, hide, or show the screen;
-- enable character/world depth occlusion and adjust depth offset;
+- enable character/world depth occlusion and adjust its depth pull (yards toward the camera);
 - enable distance-based audio and tune its range.
 - enable **Pin Plex screen to display** to keep the video fixed in the top-right
   of the game viewport while the character moves; use **Pinned size**, **Pinned
