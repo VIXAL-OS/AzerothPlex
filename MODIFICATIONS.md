@@ -29,4 +29,10 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
   pass's depth range, instead of the projection the device was given and the viewport's range. At the end of the
   scene the screen doesn't swap the depth surface either.
 - **State put back whole, and only the world pass touched:** every state block is captured right after it is created (`CreateStateBlock` alone gives the shaders' float constants above c127 back wrong on this machine's D3D9 runtime). The screen drawn before the world goes only into the world pass's own clear, into the depth surface the world is drawn with, and the frame is uploaded at the end of the scene, not inside the pass.
+- **No depth bias through hooked calls:** the screen's depth offset goes into its projection instead of
+  `D3DRS_DEPTHBIAS`, depth writes are switched on only with the depth test, and the depth surface is only set when it
+  isn't already bound. wxl-modern-water hooks the device's `SetRenderState` and `SetDepthStencilSurface` and took the
+  screen's bias for the client's own; a state block's restore doesn't pass through those hooks, so it wrote the bias
+  back for the world pass after the shadow maps, and the terrain was drawn nearer than it is (Living Azeroth's snow
+  cover vanished, shadows went wrong).
 - **Tests:** `host/tests/CytubeTests.cpp` (protocol) and `host/tests/CytubeProbe.cpp` (a live channel probe).
