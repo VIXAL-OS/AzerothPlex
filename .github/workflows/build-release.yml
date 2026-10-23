@@ -63,7 +63,8 @@ jobs:
         run: |
           cmake -S host -B host/build -A x64 `
             -DMPV_ROOT="$env:GITHUB_WORKSPACE/third_party/mpv"
-          cmake --build host/build --config Release --target wxl-video-host
+          # Everything, not just the helper: the tests below need their own executables.
+          cmake --build host/build --config Release
 
       - name: Run native tests
         shell: powershell
