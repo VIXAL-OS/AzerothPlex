@@ -45,6 +45,8 @@ add_executable(mpv_probe tests/MpvProbe.cpp)
 target_include_directories(mpv_probe PRIVATE "${MPV_ROOT}/include")
 target_compile_definitions(mpv_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 add_test(NAME mpv_probe COMMAND mpv_probe)
+# Skipped, not failed, where libmpv's own vulkan-1.dll import is missing (GPU-less CI runners): see MpvProbe.cpp.
+set_tests_properties(mpv_probe PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(frame_publisher_tests tests/FramePublisherTests.cpp FramePublisher.cpp)
 target_include_directories(frame_publisher_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")

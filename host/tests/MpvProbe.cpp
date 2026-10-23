@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <cwchar>
+
 namespace
 {
     template <typename Function>
@@ -11,10 +13,31 @@ namespace
     }
 }
 
+// Exit code 77 is ctest's "skipped" (SKIP_RETURN_CODE in CMakeLists.txt): libmpv-2.dll is beside the probe but one of
+// its own imports isn't on this machine. The x64 libmpv imports vulkan-1.dll, which comes with graphics drivers, so
+// CI runners without a GPU can't load it while every player's machine can.
+constexpr int kSkipped = 77;
+
 int main()
 {
     HMODULE module = LoadLibraryW(L"libmpv-2.dll");
-    if (!module) return 1;
+    if (!module)
+    {
+        wchar_t path[MAX_PATH];
+        const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (length > 0 && length < MAX_PATH)
+        {
+            wchar_t* slash = wcsrchr(path, L'\\');
+            if (slash && wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"libmpv-2.dll") == 0 &&
+                GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            {
+                const HMODULE vulkan = LoadLibraryW(L"vulkan-1.dll");
+                if (!vulkan) return kSkipped;
+                FreeLibrary(vulkan);
+            }
+        }
+        return 1;
+    }
 
     const auto create = Resolve<mpv_handle* (*)()>(module, "mpv_create");
     const auto setOption = Resolve<int (*)(mpv_handle*, const char*, const char*)>(
