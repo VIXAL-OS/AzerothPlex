@@ -9,8 +9,10 @@ permissions:
 
 env:
   WXL_CORE_REF: v1.1
-  MPV_RELEASE: 20260608
-  MPV_ARCHIVE: mpv-dev-i686-20260608-git-6444c05.7z
+  # The helper is 64-bit (the 32-bit libmpv/OpenSSL couldn't open HTTPS or YouTube streams), so its libmpv is the
+  # x86_64 build; the extension DLL stays Win32 for the 32-bit client.
+  MPV_RELEASE: 20261014
+  MPV_ARCHIVE: mpv-dev-x86_64-20261014-git-ec38361c56.7z
 
 jobs:
   build:
@@ -36,7 +38,7 @@ jobs:
           Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE 'extension/src/*') `
             -Destination $extensionRoot -Recurse -Force
 
-      - name: Download pinned x86 libmpv
+      - name: Download pinned x64 libmpv
         shell: powershell
         run: |
           $dependencyRoot = Join-Path $env:GITHUB_WORKSPACE 'third_party/mpv'
@@ -59,7 +61,7 @@ jobs:
       - name: Build native helper
         shell: powershell
         run: |
-          cmake -S host -B host/build -A Win32 `
+          cmake -S host -B host/build -A x64 `
             -DMPV_ROOT="$env:GITHUB_WORKSPACE/third_party/mpv"
           cmake --build host/build --config Release --target wxl-video-host
 
@@ -83,7 +85,10 @@ jobs:
           Copy-Item "wxl-core/build/dll/Release/wxl-azeroth-plex.dll" $stage
           Copy-Item "host/build/Release/wxl-video-host.exe" $stage
           Copy-Item "third_party/mpv/libmpv-2.dll" $stage
-          Copy-Item 'wxl.json','README.md','LICENSE' $stage
+          Copy-Item 'wxl.json','README.md','LICENSE','MODIFICATIONS.md' $stage
+          # The Stonewall TV sign as rendered with its Office fonts (the runner has none); the DLL renders a
+          # fallback itself if the file is missing.
+          Copy-Item 'assets/stonewall-sign.bin' $stage
           if (Test-Path 'THIRD_PARTY_NOTICES.md') {
             Copy-Item 'THIRD_PARTY_NOTICES.md' $stage
           }

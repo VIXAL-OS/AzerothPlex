@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-set(MPV_ROOT "" CACHE PATH "x86 libmpv SDK root")
+set(MPV_ROOT "" CACHE PATH "libmpv SDK root (x86_64: the helper builds as x64)")
 
 set(IMGUI_SOURCES
     third_party/imgui/imgui.cpp

@@ -2,7 +2,7 @@
 
 A native Plex client for the WarcraftXL 3.3.5a build-12340 client. Its Plex
 browser and playback controls render in the in-game Azeroth Plex panel. A
-hidden Win32 worker handles libmpv playback and mirrors the current video onto
+hidden 64-bit worker handles libmpv playback and mirrors the current video onto
 a client-local, movable world-space screen.
 
 ## Install
@@ -37,7 +37,7 @@ Poster paths are retained from Plex while navigating. WarcraftXL ABI 1.1 does
 not expose an in-game image control, so live poster rendering requires a future
 core UI image service; playback remains visible on the placed world-space screen.
 
-The pinned x86 libmpv build includes the normal FFmpeg audio/video decoders;
+The pinned x64 libmpv build includes the normal FFmpeg audio/video decoders;
 separate codec DLLs are not required. If a direct stream ends early, the worker
 reports the mpv error and retries through Plex transcoding when possible.
 
@@ -116,23 +116,23 @@ room and press **Watch live**. The world-space screen is client-local.
 
 For Plex `*.plex.direct` connections, login and metadata remain HTTPS, but the
 native media stream uses the server's standard HTTP port to avoid a known
-32-bit libmpv/OpenSSL crash while opening HTTPS media. This fallback is limited
+32-bit libmpv/OpenSSL crash while opening HTTPS media (seen with the earlier 32-bit worker). This fallback is limited
 to Plex direct-host names.
 
 ## Build
 
-The hidden playback worker is a Win32 C++20 target. The pinned x86 libmpv
-development package must be supplied through `MPV_ROOT`; the build dynamically
+The hidden playback worker is an x64 C++20 target (the extension DLL stays Win32 for the 32-bit client).
+The pinned x86_64 libmpv development package must be supplied through `MPV_ROOT`; the build dynamically
 loads `libmpv-2.dll` and does not require an MSVC import library.
 
 ```powershell
-cmake -S host -B host/build -A Win32 `
-  -DMPV_ROOT='C:/path/to/mpv-dev-i686-20260608-git-6444c05'
+cmake -S host -B host/build -A x64 `
+  -DMPV_ROOT='C:/path/to/mpv-dev-x86_64-20261014-git-ec38361c56'
 cmake --build host/build --config Release
 ctest --test-dir host/build -C Release --output-on-failure
 ```
 
-The current verified x86 runtime is mpv `v0.41.0-734-g6444c0505`, built from
-the `20260608` Windows package. Newer i686 packages must be tested before
-replacement because one newer package reproduced an upstream 32-bit OpenSSL
-assertion during libmpv initialization.
+The current verified x64 runtime is mpv `v0.41.0-1154-gec38361c5`, from shinchiro/mpv-winbuild-cmake's
+`20261014` package. The earlier 32-bit worker used the `20260608` i686 package; newer i686 packages reproduced an
+upstream 32-bit OpenSSL assertion, and the 32-bit build couldn't open HTTPS or YouTube streams, hence the move to
+x64.
