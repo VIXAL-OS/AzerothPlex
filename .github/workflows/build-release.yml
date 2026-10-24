@@ -13,6 +13,11 @@ env:
   # x86_64 build; the extension DLL stays Win32 for the 32-bit client.
   MPV_RELEASE: 20261014
   MPV_ARCHIVE: mpv-dev-x86_64-20261014-git-ec38361c56.7z
+  # yt-dlp.exe goes beside the helper for CyTube's YouTube / Vimeo / Twitch media (mpv's ytdl hook runs it). Pinned:
+  # the release, its exe's SHA-256 (GitHub's digest for the asset), and the git blob of its third-party licences.
+  YTDLP_VERSION: 2026.10.21
+  YTDLP_SHA256: 33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555
+  YTDLP_LICENSES_BLOB: 88f9872c66b456703e91ca32db4041e1ec47258d
 
 jobs:
   build:
@@ -52,6 +57,38 @@ jobs:
           & $sevenZip x $archive "-o$dependencyRoot" -y
           if ($LASTEXITCODE -ne 0) { throw "libmpv extraction failed: $LASTEXITCODE" }
 
+      - name: Download pinned yt-dlp
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'third_party/yt-dlp'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $release = "https://github.com/yt-dlp/yt-dlp/releases/download/$env:YTDLP_VERSION"
+          foreach ($name in 'yt-dlp.exe', 'SHA2-256SUMS') {
+            Invoke-WebRequest -Uri "$release/$name" -OutFile (Join-Path $root $name)
+          }
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$env:YTDLP_VERSION/THIRD_PARTY_LICENSES.txt" `
+            -OutFile (Join-Path $root 'THIRD_PARTY_LICENSES.txt')
+
+          # The exe: as that release's SHA2-256SUMS lists it, and as pinned above.
+          $actual = (Get-FileHash (Join-Path $root 'yt-dlp.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $line = Get-Content (Join-Path $root 'SHA2-256SUMS') |
+            Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?yt-dlp\.exe$' } | Select-Object -First 1
+          if (-not $line) { throw 'SHA2-256SUMS has no line for yt-dlp.exe' }
+          $listed = ($line -split '\s+')[0].ToLowerInvariant()
+          if ($actual -ne $listed) { throw "yt-dlp.exe hashes to $actual, but SHA2-256SUMS lists $listed" }
+          if ($actual -ne $env:YTDLP_SHA256) { throw "yt-dlp.exe hashes to $actual, but the workflow pins $env:YTDLP_SHA256" }
+
+          # The licences: the git blob at that tag.
+          $bytes = [IO.File]::ReadAllBytes((Join-Path $root 'THIRD_PARTY_LICENSES.txt'))
+          $header = [Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)`0")
+          $sha1 = [Security.Cryptography.SHA1]::Create()
+          $null = $sha1.TransformBlock($header, 0, $header.Length, $null, 0)
+          $null = $sha1.TransformFinalBlock($bytes, 0, $bytes.Length)
+          $blob = -join ($sha1.Hash | ForEach-Object { $_.ToString('x2') })
+          if ($blob -ne $env:YTDLP_LICENSES_BLOB) { throw "THIRD_PARTY_LICENSES.txt is blob $blob, not $env:YTDLP_LICENSES_BLOB" }
+          "yt-dlp $env:YTDLP_VERSION verified: $actual"
+
       - name: Build extension DLL
         shell: powershell
         run: |
@@ -86,6 +123,9 @@ jobs:
           Copy-Item "wxl-core/build/dll/Release/wxl-azeroth-plex.dll" $stage
           Copy-Item "host/build/Release/wxl-video-host.exe" $stage
           Copy-Item "third_party/mpv/libmpv-2.dll" $stage
+          # yt-dlp beside the helper (checked in "Download pinned yt-dlp"), with its bundled components' licences.
+          Copy-Item "third_party/yt-dlp/yt-dlp.exe" $stage
+          Copy-Item "third_party/yt-dlp/THIRD_PARTY_LICENSES.txt" (Join-Path $stage 'yt-dlp-THIRD_PARTY_LICENSES.txt')
           Copy-Item 'wxl.json','README.md','LICENSE','MODIFICATIONS.md' $stage
           # The Stonewall TV sign as rendered with its Office fonts (the runner has none); the DLL renders a
           # fallback itself if the file is missing.

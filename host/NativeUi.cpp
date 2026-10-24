@@ -734,12 +734,32 @@ namespace wxl_ui
         cytubeSync_->SetThresholds(500, 2500);
     }
 
+    void NativeUi::ConfigureYtdl(wxl_ytdl::YtdlManager& ytdl)
+    {
+        ytdl_ = &ytdl;
+        ytdl_->Check();
+    }
+
+    void NativeUi::PumpYtdl()
+    {
+        if (!ytdl_) return;
+        const wxl_ytdl::Status status = ytdl_->Current();
+        if (status.checks == ytdlChecksSeen_) return;
+        ytdlChecksSeen_ = status.checks;
+        // The hook runs the yt-dlp the panel shows (the same search; a new one found since mpv started included).
+        if (player_ && status.location.source != wxl_ytdl::Source::None) player_->SetYtdlPath(status.location.path);
+        // An item skipped for want of yt-dlp starts once it's there, from where the channel is now.
+        if (cytubeMode_ && cytubeWaitingForYtdl_ && cytubeHaveMedia_ && status.location.source != wxl_ytdl::Source::None)
+            StartCytubeMedia();
+    }
+
     void NativeUi::LeaveCytube(const std::string& why)
     {
         if (cytube_) cytube_->Leave();
         if (cytubeMode_ && player_) player_->Stop();
         cytubeMode_ = false;
         cytubeHaveMedia_ = false;
+        cytubeWaitingForYtdl_ = false;
         cytubeLoading_ = false;
         cytubeNeedPassword_ = false;
         cytubeWrongPassword_ = false;
@@ -758,6 +778,7 @@ namespace wxl_ui
         if (!player_) return;
         cytubePlayable_ = wxl_cytube::ResolvePlayable(cytubeMedia_);
         cytubeAskedAgain_ = false;
+        cytubeWaitingForYtdl_ = false;
         if (cytubeSync_) cytubeSync_->Reset();
         player_->SetSyncCorrection(1.0);
         if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
@@ -767,6 +788,24 @@ namespace wxl_ui
             stopped_ = true;
             cytubeStatus_ = "Can't play \"" + cytubeMedia_.title + "\" here (" + cytubePlayable_.reason + "); waiting for the next one.";
             return;
+        }
+        if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Ytdl)
+        {
+            // Looked for now, not as last checked: it may have been put there since. Without it the hook can't open
+            // the link, so say so plainly instead of loading into mpv's "unrecognized file format".
+            const wxl_ytdl::Location ytdl = wxl_ytdl::LocateOnThisMachine();
+            const bool known = ytdl_ && ytdl_->Current().location.path == ytdl.path;
+            if (ytdl_ && !known) ytdl_->Check(); // the panel's status catches up
+            if (ytdl.source == wxl_ytdl::Source::None)
+            {
+                player_->Stop();
+                cytubeLoading_ = false;
+                stopped_ = true;
+                cytubeWaitingForYtdl_ = true;
+                cytubeStatus_ = "Skipped: this item needs yt-dlp (see below). Waiting for the next one.";
+                return;
+            }
+            player_->SetYtdlPath(ytdl.path);
         }
         double start = cytubeTime_;
         if (!cytubePaused_ && start >= 0.0)
@@ -785,7 +824,7 @@ namespace wxl_ui
     void NativeUi::ApplyCytubeClock(bool afterLoad)
     {
         if (!player_ || !cytubeSync_ || !cytubeHaveMedia_ || cytubeLoading_ || cytubePlayable_.live ||
-            cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported)
+            cytubePlayable_.kind == wxl_cytube::Playable::Kind::Unsupported || cytubeWaitingForYtdl_)
             return;
         ++cytubeSequence_;
         const auto remote = wxl_cytube::ToPlaybackState(cytubeChannel_, cytubeMedia_, cytubeTime_, cytubePaused_,
@@ -823,6 +862,10 @@ namespace wxl_ui
         {
             lastPositionSeconds_ = std::max(0.0, event.positionSeconds);
         }
+        else if (cytubeWaitingForYtdl_)
+        {
+            // The end of whatever played before the skipped item: keep the skip's status.
+        }
         else if (event.kind == Kind::Loaded)
         {
             if (!cytubeLoading_) return;
@@ -846,6 +889,9 @@ namespace wxl_ui
                 stopped_ = true;
                 cytubeStatus_ = "Couldn't play \"" + cytubeMedia_.title + "\"" +
                                 (event.message.empty() ? std::string{} : " (" + event.message + ")") + "; waiting for the next one.";
+                if (cytubePlayable_.kind == wxl_cytube::Playable::Kind::Ytdl && ytdl_ && ytdl_->Current().stale)
+                    cytubeStatus_ = "Couldn't play \"" + cytubeMedia_.title +
+                                    "\": this yt-dlp is old, and YouTube breaks old versions; update it (below).";
             }
         }
         else if (event.kind == Kind::Ended)
@@ -1165,6 +1211,16 @@ namespace wxl_ui
         case wxl_video_shared::UiCommand::CytubePassword:
             if (cytube_ && cytubeMode_) cytube_->SendPassword(BoundedText(command.text, sizeof(command.text)));
             break;
+        case wxl_video_shared::UiCommand::CheckYtdl:
+            if (ytdl_) ytdl_->Check();
+            break;
+        case wxl_video_shared::UiCommand::UpdateYtdl:
+        {
+            // Only when asked, and only the copy beside the helper (its own updater); the refusal shows in the panel.
+            std::string why;
+            if (ytdl_) ytdl_->Update(why);
+            break;
+        }
         case wxl_video_shared::UiCommand::StartLogin:
             status_ = "Opening Plex sign-in in your browser.";
             plex_->StartLogin();
@@ -2004,7 +2060,9 @@ namespace wxl_ui
             cy.state = cytube_ ? static_cast<LONG>(cytube_->State()) : 0;
             cy.needPassword = cytubeNeedPassword_ ? 1 : 0;
             cy.wrongPassword = cytubeWrongPassword_ ? 1 : 0;
-            cy.playable = cytubeHaveMedia_ && cytubePlayable_.kind != wxl_cytube::Playable::Kind::Unsupported ? 1 : 0;
+            // (Not while skipped for want of yt-dlp: the panel would show a drift for nothing playing.)
+            cy.playable = (cytubeHaveMedia_ && cytubePlayable_.kind != wxl_cytube::Playable::Kind::Unsupported &&
+                           !cytubeWaitingForYtdl_) ? 1 : 0;
             cy.live = cytubePlayable_.live ? 1 : 0;
             cy.paused = paused_ ? 1 : 0;
             cy.loading = cytubeLoading_ ? 1 : 0;
@@ -2015,6 +2073,30 @@ namespace wxl_ui
             CopyText(cy.type, cytubeMedia_.type);
             CopyText(cy.title, cytubeMedia_.title);
             CopyText(cy.status, cytubeStatus_);
+        }
+
+        if (ytdl_)
+        {
+            const wxl_ytdl::Status status = ytdl_->Current();
+            auto& yt = snapshot.ytdl;
+            using State = wxl_ytdl::Status::State;
+            yt.state = status.state == State::Missing      ? wxl_video_shared::UiYtdlState::Missing
+                       : status.state == State::Found      ? wxl_video_shared::UiYtdlState::Found
+                       : status.state == State::Unreadable ? wxl_video_shared::UiYtdlState::Unreadable
+                                                           : wxl_video_shared::UiYtdlState::Checking;
+            yt.source = status.location.source == wxl_ytdl::Source::Bundled  ? wxl_video_shared::UiYtdlSource::Bundled
+                        : status.location.source == wxl_ytdl::Source::Search ? wxl_video_shared::UiYtdlSource::Other
+                                                                             : wxl_video_shared::UiYtdlSource::None;
+            yt.ageDays = status.ageDays;
+            yt.stale = status.stale ? 1 : 0;
+            yt.updating = status.updating ? 1 : 0;
+            CopyText(yt.version, status.version);
+            CopyText(yt.file, wxl_ytdl::PathText(status.location.path.filename(), sizeof(yt.file) - 1));
+            CopyText(yt.message, status.message);
+        }
+        else
+        {
+            snapshot.ytdl.ageDays = -1;
         }
 
         snapshot.publicRoomCount = static_cast<uint32_t>(std::min(

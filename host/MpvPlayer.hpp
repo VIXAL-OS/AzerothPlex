@@ -7,6 +7,7 @@
 #include <mpv/render.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -63,6 +64,9 @@ namespace wxl_mpv
         double VideoAspectRatio() const { return videoAspectRatio_; }
         void SetAudioTrack(int trackId);
         void SetSubtitleTrack(int trackId);
+        // The yt-dlp mpv's ytdl hook runs ("" lets the hook search for it); takes effect from the next load.
+        void SetYtdlPath(const std::filesystem::path& exe);
+        const std::filesystem::path& YtdlPath() const { return ytdlPath_; }
         void PollEvents(std::vector<MpvEvent>& events);
         bool Render();
         bool CopyFrameTo(uint8_t* destination, uint32_t destinationStride) const;
@@ -87,5 +91,6 @@ namespace wxl_mpv
         double userSpeed_ = 1.0;
         double syncCorrection_ = 1.0;
         double videoAspectRatio_ = 16.0 / 9.0;
+        std::filesystem::path ytdlPath_; // what the hook was last pointed at
     };
 }

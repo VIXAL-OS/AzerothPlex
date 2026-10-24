@@ -20,12 +20,22 @@ int main()
     bridge.slots[1].view = UiView::Details;
     std::strcpy(bridge.slots[1].error, "metadata failed");
     std::memset(bridge.slots[1].status, 'x', sizeof(bridge.slots[1].status));
+    bridge.slots[1].ytdl.state = UiYtdlState::Found;
+    bridge.slots[1].ytdl.source = UiYtdlSource::Bundled;
+    std::memset(bridge.slots[1].ytdl.version, '9', sizeof(bridge.slots[1].ytdl.version));
+    std::memset(bridge.slots[1].ytdl.file, 'f', sizeof(bridge.slots[1].ytdl.file));
+    std::memset(bridge.slots[1].ytdl.message, 'm', sizeof(bridge.slots[1].ytdl.message));
 
     UiSnapshot snapshot{};
     CHECK(ReadUiSnapshot(&bridge, snapshot));
     CHECK(snapshot.view == UiView::Details);
     CHECK(std::strcmp(snapshot.error, "metadata failed") == 0);
     CHECK(snapshot.status[kUiStatusBytes - 1] == '\0');
+    CHECK(snapshot.ytdl.state == UiYtdlState::Found && snapshot.ytdl.source == UiYtdlSource::Bundled);
+    CHECK(snapshot.ytdl.version[sizeof(snapshot.ytdl.version) - 1] == '\0');
+    CHECK(snapshot.ytdl.file[sizeof(snapshot.ytdl.file) - 1] == '\0');
+    CHECK(snapshot.ytdl.message[sizeof(snapshot.ytdl.message) - 1] == '\0');
+    CHECK(static_cast<LONG>(UiCommand::UpdateYtdl) == static_cast<LONG>(UiCommand::CytubePassword) + 2);
 
     bridge.slotSequence[1] = 8;
     CHECK(!ReadUiSnapshot(&bridge, snapshot));

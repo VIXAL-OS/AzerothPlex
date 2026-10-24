@@ -9,7 +9,8 @@ a client-local, movable world-space screen.
 
 1. Use a WarcraftXL-enabled 32-bit build-12340 client.
 2. Install the release containing `wxl-azeroth-plex.dll`,
-   `wxl-video-host.exe`, `libmpv-2.dll`, `wxl.json`, and this documentation.
+   `wxl-video-host.exe`, `libmpv-2.dll`, `yt-dlp.exe`, `wxl.json`, and this
+   documentation, all in `Extensions\wxl-azeroth-plex`.
 3. Restart the client when WarcraftXL requests it.
 4. Press **Insert**, open **Video Cinema**, and choose **Open Plex player inside
    WoW**.
@@ -83,6 +84,32 @@ The Plex token is protected with Windows DPAPI under
 `%LOCALAPPDATA%\WarcraftXL\plex-player`. The account password is never entered
 into AzerothPlex and tokens are not sent through WarcraftXL shared memory.
 
+## CyTube channels and yt-dlp
+
+The in-game **Azeroth Plex** panel can join a CyTube channel (`cytu.be/r/<channel>`)
+and play its current media in sync with the channel. Direct video files play
+as they are. YouTube, Vimeo, Twitch, Google Drive and similar sites play
+through mpv's ytdl hook, which needs [yt-dlp](https://github.com/yt-dlp/yt-dlp):
+
+- The release includes `yt-dlp.exe` beside `wxl-video-host.exe`, and the
+  helper uses that copy first. Without it, the helper uses the first of
+  `yt-dlp`, `yt-dlp_x86` or `youtube-dl` that Windows finds the way mpv's hook
+  would: the helper's folder, the system folders, then `PATH` (a pip install,
+  for example).
+- If there is none, the panel says so: *YouTube (and Vimeo, Twitch, ...) needs
+  yt-dlp: put yt-dlp.exe next to wxl-video-host.exe in
+  Extensions\wxl-azeroth-plex.* That item is skipped, and the channel's direct
+  files keep playing. **Check for yt-dlp again** picks up a newly added copy,
+  and the skipped item then starts where the channel is.
+- The panel shows yt-dlp's version and its age. YouTube breaks old yt-dlp
+  versions, so past 30 days the panel asks for an update.
+- **Update yt-dlp** runs `yt-dlp -U` on the copy beside the helper, in the
+  background, and shows the result. That is yt-dlp's own updater, which
+  downloads its latest release from GitHub. It runs only when the button is
+  pressed; nothing updates by itself.
+- A pip install updates with `python -m pip install -U yt-dlp`. Other installs
+  update the way they were installed.
+
 ## World-space screen
 
 The screen is client-local and is not a server GameObject or multiplayer
@@ -131,6 +158,11 @@ cmake -S host -B host/build -A x64 `
 cmake --build host/build --config Release
 ctest --test-dir host/build -C Release --output-on-failure
 ```
+
+`yt-dlp.exe` isn't built here. The release workflow downloads the pinned release (`YTDLP_VERSION` in
+`.github/workflows/build-release.yml`), checks it against that release's `SHA2-256SUMS` and the SHA-256 pinned in
+the workflow, and packages it beside the helper. `ytdl_tests` covers finding yt-dlp, its version's age and `-U`
+against a stand-in (`tests/FakeYtdlp.cpp`), with no network.
 
 The current verified x64 runtime is mpv `v0.41.0-1154-gec38361c5`, from shinchiro/mpv-winbuild-cmake's
 `20261014` package. The earlier 32-bit worker used the `20260608` i686 package; newer i686 packages reproduced an

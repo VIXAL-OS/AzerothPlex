@@ -8,6 +8,7 @@
 #include "SessionStore.hpp"
 #include "SyncController.hpp"
 #include "VideoShared.hpp"
+#include "YtdlTool.hpp"
 
 #include <d3d11.h>
 
@@ -67,6 +68,10 @@ namespace wxl_ui
         void ConfigureCytube(wxl_cytube::CytubeClient& cytube, wxl_party::SyncController& sync);
         void PumpCytubeEvents();
         bool CytubeMode() const { return cytubeMode_; }
+        // yt-dlp for CyTube's YouTube / Vimeo / Twitch media: its status in the panel, the hook pointed at it, and an
+        // item that was skipped for want of it started once it's there.
+        void ConfigureYtdl(wxl_ytdl::YtdlManager& ytdl);
+        void PumpYtdl();
         void HandleUiCommand(const wxl_video_shared::UiCommandPacket& command);
         void PublishUiState(wxl_video_shared::UiSnapshot& snapshot) const;
         void Draw();
@@ -185,5 +190,9 @@ namespace wxl_ui
         uint64_t cytubeEpoch_ = 0, cytubeSequence_ = 0;
         int64_t cytubeCorrectionUntilMs_ = 0; // a catch-up speed ends here unless a mediaUpdate renews it
         std::string cytubeStatus_;
+        bool cytubeWaitingForYtdl_ = false; // the current item needs yt-dlp, which wasn't there
+
+        wxl_ytdl::YtdlManager* ytdl_ = nullptr;
+        uint64_t ytdlChecksSeen_ = 0;
     };
 }

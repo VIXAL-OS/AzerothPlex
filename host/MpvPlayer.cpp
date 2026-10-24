@@ -1,5 +1,7 @@
 #include "MpvPlayer.hpp"
 
+#include "YtdlTool.hpp"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -166,36 +168,33 @@ namespace wxl_mpv
         return true;
     }
 
-    // mpv's yt-dlp hook, for CyTube's YouTube, Vimeo, Twitch and similar media: yt-dlp.exe next to this exe if it's
-    // there, else the one on PATH (the hook's own search); Node for YouTube's challenges when it's installed; at most
-    // 480p, H.264 first (the shared frame is 640 x 360 and decoding is in software).
+    // mpv's yt-dlp hook, for CyTube's YouTube, Vimeo, Twitch and similar media: pointed at the yt-dlp the panel
+    // shows (yt-dlp.exe next to this exe if it's there, else what the hook's own search would find; see
+    // wxl_ytdl::Locate); Node for YouTube's challenges when it's installed; at most 480p, H.264 first (the shared
+    // frame is 640 x 360 and decoding is in software).
     bool MpvPlayer::ConfigureYtdl()
     {
         if (api_->setOptionString(handle_, "ytdl", "yes") < 0 ||
             api_->setOptionString(handle_, "ytdl-format",
                                   "bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=480]/bv*[height<=480]+ba/b") < 0)
             return false;
-        wchar_t modulePath[MAX_PATH]{};
-        const DWORD length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-        if (length > 0 && length < MAX_PATH)
-        {
-            const auto local = std::filesystem::path(modulePath).parent_path() / L"yt-dlp.exe";
-            std::error_code error;
-            if (std::filesystem::exists(local, error))
-            {
-                const std::wstring wide = local.wstring();
-                const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-                std::string path(static_cast<size_t>(std::max(0, bytes)), '\0');
-                if (bytes > 0) WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, path.data(), bytes, nullptr, nullptr);
-                if (!path.empty() && path.back() == '\0') path.pop_back();
-                if (path.find(',') == std::string::npos) // (script-opts are comma-separated)
-                    api_->setOptionString(handle_, "script-opts", ("ytdl_hook-ytdl_path=" + path).c_str());
-            }
-        }
+        ytdlPath_ = wxl_ytdl::LocateOnThisMachine().path;
+        const std::string option = wxl_ytdl::HookPathOption(ytdlPath_);
+        if (!option.empty()) api_->setOptionString(handle_, "script-opts", option.c_str());
         wchar_t node[MAX_PATH]{};
         if (SearchPathW(nullptr, L"node.exe", nullptr, MAX_PATH, node, nullptr) > 0)
             api_->setOptionString(handle_, "ytdl-raw-options", "js-runtimes=node");
         return true;
+    }
+
+    void MpvPlayer::SetYtdlPath(const std::filesystem::path& exe)
+    {
+        if (!handle_ || !api_ || exe == ytdlPath_) return;
+        ytdlPath_ = exe;
+        // A change of script-opts runs the hook's option-update callback, which also forgets its last search, so a
+        // yt-dlp added (or updated elsewhere) after mpv started is used from the next load on. "" hands the search
+        // back to the hook.
+        api_->setPropertyString(handle_, "script-opts", wxl_ytdl::HookPathOption(exe).c_str());
     }
 
     void MpvPlayer::Shutdown()

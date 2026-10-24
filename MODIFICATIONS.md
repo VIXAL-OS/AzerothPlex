@@ -4,7 +4,7 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
 `7b2d7bb`, licensed under GPL-3.0 (see [LICENSE](LICENSE)). The modifications are released under the same license.
 
 - **Who:** VIXAL-OS, with AI coding assistants (Claude and Codex).
-- **When:** 14–17 October 2026.
+- **When:** 14–23 October 2026.
 - **Target:** the 3.3.5a client (build 12340) with WarcraftXL, played on ChromieCraft.
 
 ## What changed
@@ -41,4 +41,16 @@ This is a modified version of [AzerothPlex](https://github.com/STRHercules/Azero
   bias moved the characters with the screen; in the projection alone it brought a screen 18 yd away to 9 yd, over the
   character standing in front of it. The value is still saved, kept in presets and shared with a party in its old
   units (pull = -5 x the old value), so the old default -0.010 is 0.05 yd and older copies read the same numbers.
-- **Tests:** `host/tests/CytubeTests.cpp` (protocol) and `host/tests/CytubeProbe.cpp` (a live channel probe).
+- **yt-dlp, found and kept current** (`host/YtdlTool.*`): the release ships `yt-dlp.exe` beside the helper. The
+  helper looks for yt-dlp where mpv's ytdl hook would: that copy first, then `yt-dlp`, `yt-dlp_x86` or `youtube-dl`
+  through the process search (`PATH`). It points the hook at what it found, also when it turns up after mpv started.
+  - Without yt-dlp, a YouTube, Vimeo, Twitch or similar item is skipped and the panel says where to put
+    `yt-dlp.exe`, instead of a bare "loading failed". Direct files keep playing, and the skipped item starts once
+    yt-dlp is there.
+  - The panel shows yt-dlp's version and age, and past 30 days says that YouTube breaks old versions.
+  - **Update yt-dlp** runs `yt-dlp -U` on the copy beside the helper, in the background, only when pressed, and
+    shows the result. For a pip install, the panel gives `python -m pip install -U yt-dlp` instead.
+  - The UI bridge is version 7 (two commands and a yt-dlp snapshot), so the DLL and the helper go together.
+- **Tests:** `host/tests/CytubeTests.cpp` (protocol), `host/tests/CytubeProbe.cpp` (a live channel probe), and
+  `host/tests/YtdlTests.cpp` (finding yt-dlp, its version's age and `-U`, against the stand-in
+  `host/tests/FakeYtdlp.cpp`; no network).

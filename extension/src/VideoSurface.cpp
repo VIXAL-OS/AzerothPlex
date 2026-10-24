@@ -2846,6 +2846,52 @@ namespace wxl_video_screen
         }
     }
 
+    // yt-dlp, which CyTube's YouTube, Vimeo, Twitch and similar media play through: whether the helper found it, its
+    // version and age, and its updater (only the copy beside the helper, and only when asked).
+    void VideoSurface::DrawYtdlStatus()
+    {
+        using wxl_video_shared::UiYtdlSource;
+        using wxl_video_shared::UiYtdlState;
+        const auto& yt = uiState_.ytdl;
+        char line[320]{};
+        switch (yt.state)
+        {
+        case UiYtdlState::Checking:
+            api_->UiText("yt-dlp (for YouTube, Vimeo, Twitch, ...): checking...");
+            break;
+        case UiYtdlState::Missing:
+            // Two lines: UiText doesn't wrap.
+            api_->UiText("YouTube (and Vimeo, Twitch, ...) needs yt-dlp: put yt-dlp.exe next to");
+            api_->UiText("wxl-video-host.exe in Extensions\\wxl-azeroth-plex. Direct files play without it.");
+            break;
+        default:
+        {
+            const char* where = yt.source == UiYtdlSource::Bundled ? "beside the player" : "installed elsewhere";
+            const char* file = yt.file[0] ? yt.file : "yt-dlp";
+            if (yt.state == UiYtdlState::Unreadable || !yt.version[0])
+                std::snprintf(line, sizeof(line), "%s (%s): its version couldn't be read.", file, where);
+            else if (yt.ageDays >= 0)
+                std::snprintf(line, sizeof(line), "yt-dlp %s (%s), %ld day%s old.", yt.version, where,
+                              static_cast<long>(yt.ageDays), yt.ageDays == 1 ? "" : "s");
+            else
+                std::snprintf(line, sizeof(line), "yt-dlp %s (%s).", yt.version, where);
+            api_->UiText(line);
+            if (yt.stale) api_->UiText("YouTube breaks old yt-dlp versions; update it.");
+            if (yt.source == UiYtdlSource::Other)
+                api_->UiText("To update it: python -m pip install -U yt-dlp (or as it was installed).");
+            break;
+        }
+        }
+        if (yt.message[0]) api_->UiText(yt.message);
+        if (yt.updating) return;
+        if (yt.source == UiYtdlSource::Bundled && yt.state != UiYtdlState::Missing)
+        {
+            if (api_->UiButton("Update yt-dlp")) SendUiCommand(wxl_video_shared::UiCommand::UpdateYtdl);
+            api_->UiSameLine();
+        }
+        if (api_->UiButton("Check for yt-dlp again")) SendUiCommand(wxl_video_shared::UiCommand::CheckYtdl);
+    }
+
     void VideoSurface::DrawCytubeSection()
     {
         const bool hostUp = FindWindowW(kHostWindowClass, nullptr) && RefreshUiState();
@@ -2858,6 +2904,7 @@ namespace wxl_video_screen
                 SaveUiPreferences();
                 SendUiCommand(wxl_video_shared::UiCommand::JoinCytube, -1, 0, cytubeChannel_);
             }
+            if (hostUp) DrawYtdlStatus();
             return;
         }
 
@@ -2901,6 +2948,7 @@ namespace wxl_video_screen
                 SecureZeroMemory(cytubePassword_, sizeof(cytubePassword_));
             }
         }
+        DrawYtdlStatus();
         if (api_->UiButton("Leave CyTube channel"))
             SendUiCommand(wxl_video_shared::UiCommand::LeaveCytube);
     }

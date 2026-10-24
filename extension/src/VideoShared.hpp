@@ -67,7 +67,7 @@ namespace wxl_video_shared
 
     constexpr wchar_t kUiMappingName[] = L"Local\\WXLVideoCinemaUi-v1";
     constexpr uint32_t kUiMagic = 0x55565857u; // "WXVU"
-    constexpr uint32_t kUiVersion = 6; // 6: CyTube (three commands, UiCytubeSnapshot)
+    constexpr uint32_t kUiVersion = 7; // 6: CyTube (three commands, UiCytubeSnapshot); 7: yt-dlp (two, UiYtdlSnapshot)
     constexpr size_t kUiTextBytes = 256;
     constexpr size_t kUiErrorBytes = 192;
     constexpr size_t kUiStatusBytes = 192;
@@ -148,6 +148,8 @@ namespace wxl_video_shared
         JoinCytube,       // text: a channel link or name
         LeaveCytube,
         CytubePassword,   // text: the channel's password
+        CheckYtdl,        // look for yt-dlp (and its version) again
+        UpdateYtdl,       // run `yt-dlp -U` on the yt-dlp.exe beside the helper
     };
 
     struct UiServerSnapshot
@@ -266,6 +268,35 @@ namespace wxl_video_shared
         char status[kUiStatusBytes]{};
     };
 
+    // yt-dlp, which mpv's ytdl hook runs for CyTube's YouTube, Vimeo, Twitch and similar media.
+    enum class UiYtdlState : LONG
+    {
+        Checking,
+        Missing,
+        Found,
+        Unreadable, // found, but its version couldn't be read
+    };
+
+    enum class UiYtdlSource : LONG
+    {
+        None,
+        Bundled, // yt-dlp.exe beside wxl-video-host.exe: "Update yt-dlp" runs its own -U
+        Other,   // a pip or other install the helper found (usually on PATH)
+    };
+
+    struct UiYtdlSnapshot
+    {
+        UiYtdlState state = UiYtdlState::Checking;
+        UiYtdlSource source = UiYtdlSource::None;
+        LONG ageDays = -1;      // since its version's release date; -1 unknown
+        LONG stale = 0;         // older than the helper's limit (30 days): YouTube breaks old versions
+        LONG updating = 0;      // its -U is running
+        LONG reserved[3]{};
+        char version[32]{};
+        char file[64]{};                // the file name the hook runs (yt-dlp.exe, youtube-dl.exe, ...)
+        char message[kUiStatusBytes]{}; // the last check's or update's result
+    };
+
     struct UiSnapshot
     {
         uint32_t structBytes = sizeof(UiSnapshot);
@@ -340,7 +371,8 @@ namespace wxl_video_shared
         UiPartyMemberSnapshot partyMembers[kUiMaxPartyMembers]{};
         UiPartyQueueSnapshot partyQueue[kUiMaxPartyQueue]{};
         UiPublicRoomSnapshot publicRooms[kUiMaxPublicRooms]{};
-        UiCytubeSnapshot cytube{}; // (last: appended in v6)
+        UiCytubeSnapshot cytube{}; // (appended in v6)
+        UiYtdlSnapshot ytdl{};     // (last: appended in v7)
     };
 
     struct UiBridge
@@ -426,6 +458,9 @@ namespace wxl_video_shared
             result.cytube.type[sizeof(result.cytube.type) - 1] = '\0';
             result.cytube.title[sizeof(result.cytube.title) - 1] = '\0';
             result.cytube.status[sizeof(result.cytube.status) - 1] = '\0';
+            result.ytdl.version[sizeof(result.ytdl.version) - 1] = '\0';
+            result.ytdl.file[sizeof(result.ytdl.file) - 1] = '\0';
+            result.ytdl.message[sizeof(result.ytdl.message) - 1] = '\0';
             if (bridge->slotSequence[active] == slotSequence &&
                 bridge->sequence == sequence &&
                 result.structBytes == sizeof(UiSnapshot))

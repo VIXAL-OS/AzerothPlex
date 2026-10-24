@@ -50,6 +50,7 @@ namespace wxl_video_screen
         void DrawPlexSettings();
         void DrawMiniPlayer();
         void DrawCytubeSection();
+        void DrawYtdlStatus();
         // Stonewall TV: a neon "Stonewall TV" sign above the screen, its rainbow glittering.
         void DrawStonewall(IDirect3DDevice9* device, void* sceneDepth);
         // Ambient glow: the picture's edge colours as a soft light just behind the world screen.

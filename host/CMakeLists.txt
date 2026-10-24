@@ -20,7 +20,7 @@ set(IMGUI_SOURCES
 add_executable(wxl-video-host WIN32
     VideoHost.cpp FramePublisher.cpp MpvPlayer.cpp PlexClient.cpp TokenStore.cpp NativeUi.cpp
     PartyTypes.cpp PartyProtocol.cpp SyncController.cpp SessionStore.cpp PartyClient.cpp
-    LiveCodec.cpp LiveAudio.cpp CytubeProtocol.cpp CytubeClient.cpp
+    LiveCodec.cpp LiveAudio.cpp CytubeProtocol.cpp CytubeClient.cpp YtdlTool.cpp
     ${IMGUI_SOURCES})
 target_include_directories(wxl-video-host PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}"
@@ -67,7 +67,7 @@ target_compile_definitions(token_store_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMA
 target_link_libraries(token_store_tests PRIVATE crypt32)
 add_test(NAME token_store_tests COMMAND token_store_tests)
 
-add_executable(mpv_player_tests tests/MpvPlayerTests.cpp MpvPlayer.cpp)
+add_executable(mpv_player_tests tests/MpvPlayerTests.cpp MpvPlayer.cpp YtdlTool.cpp)
 target_include_directories(mpv_player_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}"
     "${MPV_ROOT}/include")
@@ -77,7 +77,7 @@ add_test(NAME mpv_player_tests COMMAND mpv_player_tests)
 
 add_executable(native_ui_tests tests/NativeUiTests.cpp NativeUi.cpp MpvPlayer.cpp PlexClient.cpp TokenStore.cpp FramePublisher.cpp
     PartyTypes.cpp PartyProtocol.cpp SyncController.cpp SessionStore.cpp PartyClient.cpp CytubeProtocol.cpp CytubeClient.cpp
-    ${IMGUI_SOURCES})
+    YtdlTool.cpp ${IMGUI_SOURCES})
 target_include_directories(native_ui_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}"
     "${MPV_ROOT}/include"
@@ -126,6 +126,15 @@ target_include_directories(cytube_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/third_party")
 target_compile_definitions(cytube_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 add_test(NAME cytube_tests COMMAND cytube_tests)
+
+# yt-dlp: where the hook finds it, its version's age, and its -U, against a stand-in (no network).
+add_executable(fake_ytdlp tests/FakeYtdlp.cpp)
+target_compile_definitions(fake_ytdlp PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+add_executable(ytdl_tests tests/YtdlTests.cpp YtdlTool.cpp)
+target_include_directories(ytdl_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+target_compile_definitions(ytdl_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+add_dependencies(ytdl_tests fake_ytdlp)
+add_test(NAME ytdl_tests COMMAND ytdl_tests "$<TARGET_FILE:fake_ytdlp>")
 
 add_executable(cytube_probe tests/CytubeProbe.cpp CytubeClient.cpp CytubeProtocol.cpp PartyTypes.cpp)
 target_include_directories(cytube_probe PRIVATE

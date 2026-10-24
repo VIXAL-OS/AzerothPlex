@@ -13,6 +13,7 @@
 #include "SessionStore.hpp"
 #include "SyncController.hpp"
 #include "VideoShared.hpp"
+#include "YtdlTool.hpp"
 #include "backends/imgui_impl_win32.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -61,6 +62,7 @@ namespace
     wxl_party::SyncController g_sync;
     std::unique_ptr<wxl_cytube::CytubeClient> g_cytube;
     wxl_party::SyncController g_cytubeSync;
+    std::unique_ptr<wxl_ytdl::YtdlManager> g_ytdl;
     wxl_ui::NativeUi g_ui;
     wxl_live::LiveEncoder g_liveEncoder;
     wxl_live::LiveDecoder g_liveDecoder;
@@ -335,6 +337,7 @@ namespace
         g_ui.HandleMpvEvents(events);
         g_ui.PumpPlexEvents();
         g_ui.PumpPartyEvents();
+        g_ui.PumpYtdl();
         g_ui.PumpCytubeEvents();
         ProcessUiCommand();
 
@@ -594,6 +597,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int)
     g_ui.ConfigureParty(*g_party, g_sync, *g_partyStore, partySettings);
     g_cytube = std::make_unique<wxl_cytube::CytubeClient>();
     g_ui.ConfigureCytube(*g_cytube, g_cytubeSync);
+    g_ytdl = std::make_unique<wxl_ytdl::YtdlManager>(wxl_ytdl::ThisExeDirectory());
+    g_ui.ConfigureYtdl(*g_ytdl);
     g_ui.Hide();
     SetTimer(g_window, kTickTimer, kTickIntervalMs, nullptr);
     if (g_parentProcess) CreateThread(nullptr, 0, WatchParentProcess, nullptr, 0, nullptr);
@@ -616,6 +621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int)
     wxl_live::ShutdownMediaFoundation();
     g_ui.Shutdown();
     g_player.Shutdown();
+    g_ytdl.reset();
     g_cytube.reset();
     g_party.reset();
     g_partyStore.reset();
