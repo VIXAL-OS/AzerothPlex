@@ -1,5 +1,7 @@
 # Azeroth Plex
 
+**WarcraftXL x64 preview.** The x64 mod and shared **/film** addon install alongside WarcraftXL-Labs x64 ABI 0.1.46, using the existing client executable. [Download the prerelease](https://github.com/VIXAL-OS/AzerothPlex/releases/tag/film-club-x64-v0.1.0-preview.1) · [x64 build and install instructions](x64/README.md)
+
 A native Plex client for the WarcraftXL 3.3.5a build-12340 client. Its Plex
 browser and playback controls render in the in-game Azeroth Plex panel. A
 hidden 64-bit worker handles libmpv playback and mirrors the current video onto

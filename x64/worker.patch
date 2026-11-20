@@ -1,0 +1,231 @@
+--- /dev/null
++++ b/FilmWorker.h
+@@ -0,0 +1,23 @@
++#pragma once
++#include <windows.h>
++#include <cwchar>
++#include <string>
++
++inline std::wstring filmName(const wchar_t* part, DWORD child) {
++    return L"Local\\WxlFilm-" + std::to_wstring(child) + L"-" + part;
++}
++inline HANDLE filmLifetime = nullptr;
++inline bool filmOpenLifetime(const wchar_t* args) {
++    // The owner creates this event before launch and signals it even on an immediate close.
++    const wchar_t* value = args ? wcsstr(args, L"--lifetime ") : nullptr;
++    if (!value) return false;
++    value += 11;
++    std::wstring suffix(value, wcscspn(value, L" \t"));
++    if (suffix.empty() || suffix.size() > 64 || suffix.find_first_not_of(L"0123456789-") != suffix.npos)
++        return false;
++    filmLifetime = OpenEventW(SYNCHRONIZE, FALSE, (L"Local\\WxlFilm-Life-" + suffix).c_str());
++    return filmLifetime && WaitForSingleObject(filmLifetime, 0) == WAIT_TIMEOUT;
++}
++inline bool filmStopping() {
++    return WaitForSingleObject(filmLifetime, 0) != WAIT_TIMEOUT;
++}
+--- a/FramePublisher.cpp
++++ b/FramePublisher.cpp
+@@ -1,3 +1,4 @@
++#include "FilmWorker.h"
+ #include "FramePublisher.hpp"
+ 
+ #include <cstring>
+@@ -70,7 +71,7 @@
+ 
+         mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                       static_cast<DWORD>(wxl_video_shared::kMappingBytes),
+-                                      wxl_video_shared::kMappingName);
++                                      filmName(L"Frames", GetCurrentProcessId()).c_str());
+         if (!mapping_) return false;
+ 
+         const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
+--- a/PartyClient.cpp
++++ b/PartyClient.cpp
+@@ -98,14 +98,6 @@
+     void PartyClient::Disconnect()
+     {
+         desiredConnected_.store(false);
+-        HINTERNET socket = nullptr;
+-        {
+-            std::lock_guard lock(socketMutex_);
+-            socket = socket_;
+-        }
+-        if (socket)
+-            WinHttpWebSocketClose(socket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+-                                  nullptr, 0);
+         SetState(PartyConnectionState::Disconnected);
+         outgoingChanged_.notify_all();
+     }
+@@ -276,6 +268,7 @@
+         std::lock_guard lock(binaryOutMutex_);
+         pendingFrame_.assign(data.begin(), data.end());
+         hasPendingFrame_ = true;
++        outgoingChanged_.notify_one();
+     }
+ 
+     void PartyClient::Queue(PartyWireMessage message)
+@@ -483,10 +476,6 @@
+                 continue;
+             }
+ 
+-            {
+-                std::lock_guard lock(socketMutex_);
+-                socket_ = socket;
+-            }
+             SetState(PartyConnectionState::Connected);
+ 
+             PartyWireMessage hello = BaseMessage(PartyMessageType::Hello);
+@@ -513,20 +502,34 @@
+                 SendNow(socket, rejoin);
+             }
+ 
+-            bool connected = true;
+-            while (connected && desiredConnected_.load() && !stop.stop_requested())
+-            {
+-                if (!FlushOutgoing(socket)) break;
+-                FlushBinary(socket);
+-                const int64_t now = NowMs();
+-                if (now - lastPingSentMs_ >= 5000)
++            // A synchronous receive can sleep for an idle room's entire lifetime.
++            // WinHTTP permits one sender alongside one receiver on this handle.
++            std::jthread sender([this, socket](std::stop_token done) {
++                while (!done.stop_requested() && desiredConnected_.load())
+                 {
+-                    PartyWireMessage ping = BaseMessage(PartyMessageType::Ping);
+-                    ping.sentAtMs = now;
+-                    if (!SendNow(socket, ping)) break;
+-                    lastPingSentMs_ = now;
++                    if (!FlushOutgoing(socket)) break;
++                    FlushBinary(socket);
++                    const int64_t now = NowMs();
++                    if (now - lastPingSentMs_ >= 5000) {
++                        auto ping = BaseMessage(PartyMessageType::Ping);
++                        ping.sentAtMs = now;
++                        if (!SendNow(socket, ping)) break;
++                        lastPingSentMs_ = now;
++                    }
++                    std::unique_lock lock(outgoingMutex_);
++                    auto delay = std::chrono::milliseconds(std::clamp<int64_t>(lastPingSentMs_ + 5000 - NowMs(), 1, 5000));
++                    outgoingChanged_.wait_for(lock, done, delay, [this] {
++                        if (!desiredConnected_.load() || !outgoing_.empty()) return true;
++                        std::lock_guard binaryLock(binaryOutMutex_);
++                        return hasPendingFrame_;
++                    });
+                 }
+-
++                if (!done.stop_requested())
++                    WinHttpWebSocketShutdown(socket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
++            });
++
++            while (desiredConnected_.load() && !stop.stop_requested())
++            {
+                 std::string text;
+                 std::vector<uint8_t> binary;
+                 bool isBinary = false;
+@@ -553,10 +556,9 @@
+                 PushEvent(std::move(incoming));
+             }
+ 
+-            {
+-                std::lock_guard lock(socketMutex_);
+-                socket_ = nullptr;
+-            }
++            sender.request_stop();
++            outgoingChanged_.notify_all();
++            sender.join();
+             WinHttpWebSocketClose(socket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+             WinHttpCloseHandle(socket);
+             if (connection) WinHttpCloseHandle(connection);
+--- a/PartyClient.hpp
++++ b/PartyClient.hpp
+@@ -109,12 +109,10 @@
+         std::mutex binaryInMutex_;
+         std::deque<std::vector<uint8_t>> binaryEvents_;
+ 
+-        std::mutex socketMutex_;
+-        HINTERNET socket_ = nullptr;
+         std::atomic<bool> desiredConnected_{false};
+         std::atomic<uint32_t> reconnectCount_{0};
+-        std::jthread worker_;
+         std::string clientId_;
+         int64_t lastPingSentMs_ = 0;
++        std::jthread worker_;
+     };
+ }
+--- a/VideoHost.cpp
++++ b/VideoHost.cpp
+@@ -1,3 +1,4 @@
++#include "FilmWorker.h"
+ // Native Plex helper used by wxl-azeroth-plex.
+ // Copyright (C) 2026 WarcraftXL contributors
+ // SPDX-License-Identifier: GPL-3.0-or-later
+@@ -117,7 +118,7 @@
+         g_controlMapping = CreateFileMappingW(
+             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+             static_cast<DWORD>(sizeof(wxl_video_shared::ControlBlock)),
+-            wxl_video_shared::kControlMappingName);
++            filmName(L"Control", GetCurrentProcessId()).c_str());
+         if (!g_controlMapping) return false;
+         const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
+         g_controlView = MapViewOfFile(g_controlMapping, FILE_MAP_ALL_ACCESS, 0, 0,
+@@ -162,7 +163,7 @@
+         g_uiMapping = CreateFileMappingW(
+             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+             static_cast<DWORD>(sizeof(wxl_video_shared::UiBridge)),
+-            wxl_video_shared::kUiMappingName);
++            filmName(L"Ui", GetCurrentProcessId()).c_str());
+         if (!g_uiMapping) return false;
+         const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
+         g_uiView = MapViewOfFile(g_uiMapping, FILE_MAP_ALL_ACCESS, 0, 0,
+@@ -217,6 +218,7 @@
+         if (bridge->commandSequence != sequence) return;
+         g_ui.HandleUiCommand(command);
+         g_lastUiCommandSequence = sequence;
++        InterlockedExchange(&bridge->command.command, 0);
+     }
+ 
+     void PublishUiState()
+@@ -260,6 +262,7 @@
+                 default: break;
+                 }
+                 g_lastCommandSequence = commandSequence;
++                InterlockedExchange(&control->command, 0);
+             }
+         }
+ 
+@@ -323,10 +326,17 @@
+ 
+     std::filesystem::path LocalDataDirectory()
+     {
++        wchar_t profile[32768];
++        DWORD n = GetEnvironmentVariableW(L"WXLFILM_PROFILE_ROOT", profile, 32768);
++        if (n && n < 32768 && std::filesystem::path(profile).is_absolute()) {
++            auto path = std::filesystem::path(profile) / L"Plex";
++            std::error_code ec; std::filesystem::create_directories(path, ec);
++            return ec ? std::wstring{} : path.wstring();
++        }
+         wchar_t path[MAX_PATH]{};
+         if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)))
+             return {};
+-        return std::filesystem::path(path) / L"WarcraftXL" / L"plex-player";
++        return std::filesystem::path(path) / L"WarcraftXLFilm" / L"plex-player";
+     }
+ 
+     void RenderFrame()
+@@ -522,6 +532,7 @@
+                 ResizeGraphics(LOWORD(lParam), HIWORD(lParam));
+             return 0;
+         case WM_TIMER:
++            if (filmStopping()) { PostMessageW(window, WM_CLOSE, 0, 0); return 0; }
+             if (wParam == kTickTimer) RenderFrame();
+             return 0;
+         case WM_CLOSE:
+@@ -541,6 +552,7 @@
+ {
+     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 1;
+     wxl_live::StartupMediaFoundation();
++    if (!filmOpenLifetime(commandLine)) return 8;
+     const DWORD parentPid = ParseParentPid(commandLine);
+     if (parentPid) g_parentProcess = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+ 
